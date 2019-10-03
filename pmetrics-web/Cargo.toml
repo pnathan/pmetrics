@@ -3,8 +3,16 @@ name = "pmetrics-web"
 version = "0.1.0"
 authors = ["Paul Nathan <paul@nathan.house>"]
 
+[features]
+default = ["postgres/with-serde_json", "postgres/with-chrono"]
 [dependencies]
-serde_json = "1.0"
+
 iron = "*"
 router = "*"
-postgres = "*"
+
+# https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html
+postgres = "^0.15"
+r2d2_postgres = "*"
+time = "^0.1"
+chrono = { version = "^0.4", features = ["serde"] }
+serde_json = "^1.0"
