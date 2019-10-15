@@ -1,20 +1,23 @@
-INCLUDE=-I/usr/include/postgresql
-LIBS=-L/usr/lib/postgresql/9.4/lib -lpq
+INCLUDE:=-I$(shell pg_config --includedir)
+LIBS:=-L$(shell pg_config --libdir) -lpgcommon -lpgport -lpthread -lpq
 CFLAGS=-Wall -pedantic -Wextra -O3
-.PHONY: clean
+.PHONY: clobber clean
 
 all: pmetrics-logger pmetrics-measure
 
 pmetrics-logger: pmetrics-logger.cpp pmetrics-common.o
 	g++ $(INCLUDE) $(CFLAGS) pmetrics-logger.cpp -c
-	g++ $(LIBS) pmetrics-logger.o pmetrics-common.o -o pmetrics-logger
+	g++ $(INCLUDE) pmetrics-logger.o pmetrics-common.o -o pmetrics-logger  $(LIBS)
 
 pmetrics-measure: pmetrics-measure.cpp pmetrics-common.o
 	g++ $(INCLUDE) $(CFLAGS) pmetrics-measure.cpp -c
-	g++ $(LIBS) pmetrics-measure.o pmetrics-common.o -o pmetrics-measure
+	g++ $(INCLUDE) pmetrics-measure.o pmetrics-common.o -o pmetrics-measure  $(LIBS)
 
 pmetrics-common.o: pmetrics-common.cpp pmetrics-common.h
-	g++ $(LIBS) $(CFLAGS) pmetrics-common.cpp -c
+	g++ $(INCLUDE) $(CFLAGS) pmetrics-common.cpp -c  $(LIBS)
 
 clobber:
 	rm -f *~ pmetrics-logger pmetrics-measure *.o
+
+clean:
+	rm -f pmetrics-measure pmetrics-logger *.o
