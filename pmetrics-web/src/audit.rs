@@ -38,11 +38,11 @@ pub enum Concern {
     Crisis(Event)
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum AuditTarget {
     StdErr
 }
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct Audit {
     level: ConcernLevel,
     t: AuditTarget
@@ -53,6 +53,9 @@ impl Audit {
         Audit { level: c, t: AuditTarget::StdErr }
     }
 
+    pub fn debug(&self, event: Event) {
+        self.tell(&Concern::Debug(event));
+    }
     pub fn tell(&self, c: &Concern) {
 
         match &self.t {

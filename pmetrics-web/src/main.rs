@@ -72,26 +72,39 @@ fn poast<T: std::fmt::Debug + Deserialize> (req: &mut Request, auditor: audit::A
     Ok(Response::with((status::Ok, "ok")))
 }
 */
-fn postlog(req: &mut Request, conn: postgres::Connection, auditor: audit::Audit) -> IronResult<Response> {
+fn postlog(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+
+    let conn = connect_to_db(&auditor);
     auditor.tell(&audit::Concern::Debug(audit::Event::new("started", "http connection")));
     let mut buffer = String::new();
     req.body.read_to_string(&mut buffer);
-    println!("Event: {}", buffer);
     let deserialized: LogIngest = serde_json::from_str(&buffer).unwrap();
-    println!("{:?}", deserialized);
-    auditor.tell(&audit::Concern::Debug(audit::Event::new("ending", "http connection")));
+    // TODO: proper match arms and http answers
+    conn.execute("INSERT INTO monitoring.log (logtext) VALUES ($1)", &[&deserialized.log]).unwrap();
+    auditor.debug(audit::Event::new("ending", "http connection"));
     Ok(Response::with((status::Ok, "ok")))
 }
 
-fn getlog(req: &mut Request, conn: postgres::Connection, auditor: audit::Audit) -> IronResult<Response> {
-    auditor.tell(&audit::Concern::Debug(audit::Event::new("started", "http connection")));
-    let mut buffer = String::new();
-    req.body.read_to_string(&mut buffer);
-    println!("Event: {}", buffer);
-    serde_json::from_str(&buffer).map(|v:Value|
-                                      println!("Event Structured: {}", v));
+fn getlog(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+    let conn = connect_to_db(&auditor);
+    auditor.debug(audit::Event::new("started", "http connection"));
+
+    let mut vec: Vec<Log> = Vec::new();
+
+    for row in &conn.query("SELECT insertion_time, logtext from monitoring.log order by insertion_time desc limit 100", &[]).unwrap() {
+        let log = Log {
+            insertion_time: row.get(0),
+            d: LogIngest {
+                log: row.get(1),
+            }
+        };
+
+        vec.push(log);
+    }
+
+    let result = serde_json::to_string(&vec).unwrap();
     auditor.tell(&audit::Concern::Debug(audit::Event::new("ending", "http connection")));
-    Ok(Response::with((status::Ok, "ok")))
+    Ok(Response::with((status::Ok, result)))
 }
 
 fn postevent(req: &mut Request) -> IronResult<Response> {
@@ -253,20 +266,23 @@ actually we're going to break this code up:
         Command::Server(_, server_options, servertype) => {
             match servertype {
                 ServerType::Http => {
-                    let conn = connect_to_db(&auditor);
+
                     let mut router = Router::new();
                     router.get("/", handler, "index");
 
                     router.post("/api/v1/event", postevent, "event");
                     router.get("/api/v1/event", getevent, "event");
 
-                    router.post("/api/v1/log", |req: &mut Request| -> IronResult<Response> {
-                        postlog(req, conn, auditor.clone())
+
+                    router.post("/api/v1/log", move |req: &mut Request| -> IronResult<Response> {
+                        postlog(req, &auditor)
                     }, "log");
-                    router.get("/api/v1/log", |req: &mut Request| -> IronResult<Response> {
-                        getlog(req, conn, auditor.clone())
+                    router.get("/api/v1/log", move |req: &mut Request| -> IronResult<Response> {
+                        getlog(req, &auditor)
                     }, "log");
-                    Iron::new(router).http("localhost:3000").unwrap();
+                    Iron::new(router)
+                        .http(format!("localhost:{}", server_options.port))
+                        .unwrap();
                 }
                 _ => {
                     panic!("inpossible code");
