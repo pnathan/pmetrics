@@ -13,7 +13,7 @@ id serial,
 insertion_time timestamp with time zone not null default now(),
 name text not null,
 measurement float not null,
-dict jsonb);
+dict jsonb not null);
 
 
 CREATE TABLE  monitoring.event(

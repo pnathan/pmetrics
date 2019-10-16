@@ -25,6 +25,10 @@ impl Event {
     }
 }
 
+pub fn event(k: &str, v: &str) -> Event {
+    Event::new(k,v)
+}
+
 #[derive(Copy, Clone)]
 pub enum ConcernLevel {
     Debug,
@@ -55,6 +59,12 @@ impl Audit {
 
     pub fn debug(&self, event: Event) {
         self.tell(&Concern::Debug(event));
+    }
+    pub fn info(&self, event: Event) {
+        self.tell(&Concern::Info(event));
+    }
+    pub fn crisis(&self, event: Event) {
+        self.tell(&Concern::Crisis(event));
     }
     pub fn tell(&self, c: &Concern) {
 
