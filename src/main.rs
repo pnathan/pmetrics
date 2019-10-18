@@ -4,19 +4,21 @@ extern crate router;
 extern crate serde;
 extern crate serde_json;
 extern crate postgres;
+extern crate clap;
+
 
 use std::collections::HashMap;
 use std::env;
 use std::io::Read;
 
 use chrono::prelude::{DateTime, Utc};
+use clap::{Arg, App, SubCommand};
 use iron::prelude::{IronResult, Request, Response, Iron};
 use iron::status;
 use postgres::{Connection, TlsMode};
 use router::Router;
 use serde::{Deserialize, Serialize};
-use serde::de::DeserializeOwned;
-
+use serde::de::DeserializeOwned; // this is /not obvious/.
 use serde_json::{Value};
 
 mod audit;
@@ -73,7 +75,7 @@ where T: DeserializeOwned,
     match req.body.read_to_string(&mut buffer) {
         Ok(_) => {} // no-op
         Err(_)=> {
-            auditor.info(audit::eventw(&["error", "true", "class", "string read"]));
+            auditor.info(audit::eventw(&["error", "true", "module", "web", "class", "string read"]));
             return Ok(Response::with((status::BadRequest, "unable to read string")))
         }
     }
@@ -86,14 +88,14 @@ where T: DeserializeOwned,
                     Ok(Response::with((status::Ok, "ok")))
                 }
                 Err(_) => {
-                    auditor.info(audit::eventw(&["error", "true", "class", "db insert"]));
+                    auditor.info(audit::eventw(&["error", "true","module", "web",  "class", "db insert"]));
                     Ok(Response::with((status::BadGateway, "server error")))
                 }
             }
         }
 
         Err(_) => {
-            auditor.info(audit::eventw(&["error", "true", "class", "deserialize/parse"]));
+            auditor.info(audit::eventw(&["error", "true", "module", "web",  "class", "deserialize/parse"]));
             Ok(Response::with((status::BadRequest, "bad parse and cast")))
         }
     }
@@ -110,6 +112,7 @@ fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
     generic_post(req, auditor, f)
 }
 
+// TODO: dry up.
 fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     let conn = connect_to_db(&auditor);
     let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100";
@@ -127,7 +130,6 @@ fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
                 });
             }
             let result = serde_json::to_string(&vec).unwrap();
-            auditor.debug(audit::event("ending", "http connection"));
             Ok(Response::with((status::Ok, result)))
         }
         Err(e) => {
@@ -266,8 +268,7 @@ struct GlobalOptions {
 
 enum ServerType {
     Http,
-    NamedPipe,
-    Grpc
+    NamedPipe
 }
 struct ServerOptions {
     port: u16
@@ -279,40 +280,52 @@ enum Command {
     Debugger(GlobalOptions)
 }
 
-fn cliparser() -> Command {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
-    let go = GlobalOptions { verbosity: audit::ConcernLevel::Debug};
-    match command.as_ref() {
-        "cli" => {
-            // reads from standard in.
-            Command::CliClient(go)
-        }
-        "server" => {
-            let servertype = &args[2];
-            match servertype.as_ref() {
-                "json" => {
-                    Command::Server(go,
-                                    ServerOptions { port: 1337 },
-                                    ServerType::Http)
-                }
-                _ => {
-                    panic!("I only speak `json` server, not {}", servertype);
-                }
-            }
-        }
-        "debug" => {
-            Command::Debugger(go)
-        }
-        _ => {
-            panic!("I don't understand the command: {}", command);
-        }
-    }
+fn clapparser() -> Command {
+    let matches = App::new("pmetrics")
+        .version("0.0.1")
+        .about("an o11y system")
+        .arg(Arg::with_name("v")
+             .short("v")
+             .multiple(true)
+             .help("verbosity - 0,1,2 being valid values "))
+        .subcommand(SubCommand::with_name("server")
+                    .about("server")
+                    .arg(Arg::with_name("type")
+                         .required(true)
+                         .help("type of server"))
+                    .arg(Arg::with_name("port")
+                         .short("p")
+                         .takes_value(true)
+                         .help("server port")))
+        .get_matches();
 
+    let cl = match matches.occurrences_of("v") {
+        0 => audit::ConcernLevel::Crisis,
+        1 => audit::ConcernLevel::Info,
+        2 | _ => audit::ConcernLevel::Debug
+    };
+
+    let go = GlobalOptions { verbosity: cl };
+
+    if let Some(matches) = matches.subcommand_matches("server") {
+
+        let servertype = matches.value_of("type").unwrap();
+        let st = match servertype  {
+            "http" => ServerType::Http,
+            "pipe" => ServerType::NamedPipe,
+            _ => panic!("Unable to start server, crashing. specify type http or pipe")
+        };
+
+        let port = matches.value_of("port").unwrap_or("1337").parse::<u16>().unwrap();
+        let so = ServerOptions { port: port };
+
+        return Command::Server(go, so, st)
+    }
+    panic!("what! run --help please!")
 }
 
 fn main() {
-    let cmd = cliparser();
+    let cmd = clapparser();
 
     let cl = match cmd {
         Command::Server(go, _, _) => go.verbosity,

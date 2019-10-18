@@ -7,6 +7,7 @@ authors = ["Paul Nathan <paul@nathan.house>"]
 default = ["postgres/with-serde_json", "postgres/with-chrono"]
 [dependencies]
 
+clap = "2.33"
 either = "1.5"
 itertools = "0.8.0"
 iron = "*"
