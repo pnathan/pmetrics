@@ -15,6 +15,8 @@ use iron::status;
 use postgres::{Connection, TlsMode};
 use router::Router;
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+
 use serde_json::{Value};
 
 mod audit;
@@ -60,74 +62,52 @@ struct Event {
 
 // TODO: Write a Search api.
 
-/*
-fn generic_post<'a, T>(req: & mut Request,
-                       auditor: &audit::Audit,
-                       f: dyn Fn(postgres::Connection, T)->Result<u64, postgres::Error>) -> IronResult<Response>
-where T: serde::Deserialize<'a> {
-
-    let conn = connect_to_db(&auditor);
+fn generic_post<'a, T, F>(req: &'a mut Request,
+                          auditor: &audit::Audit,
+                          insert_function: F) -> IronResult<Response>
+where T: DeserializeOwned,
+      F: Fn(postgres::Connection, T)->Result<u64, postgres::Error>,
+{
     let mut buffer = String::new();
-    req.body.read_to_string(&mut buffer);
+
+    match req.body.read_to_string(&mut buffer) {
+        Ok(_) => {} // no-op
+        Err(_)=> {
+            auditor.info(audit::eventw(&["error", "true", "class", "string read"]));
+            return Ok(Response::with((status::BadRequest, "unable to read string")))
+        }
+    }
     let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
-            match f(conn, deserialized) {
+            let conn = connect_to_db(&auditor);
+            match insert_function(conn, deserialized) {
                 Ok(_) => {
                     Ok(Response::with((status::Ok, "ok")))
                 }
                 Err(_) => {
-                    auditor.debug(audit::event("error", "true"));
+                    auditor.info(audit::eventw(&["error", "true", "class", "db insert"]));
                     Ok(Response::with((status::BadGateway, "server error")))
                 }
             }
         }
 
         Err(_) => {
-            auditor.debug(audit::event("error", "true"));
+            auditor.info(audit::eventw(&["error", "true", "class", "deserialize/parse"]));
             Ok(Response::with((status::BadRequest, "bad parse and cast")))
         }
     }
 }
-
-fn bigpost(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    fn logf(conn: postgres::Connection, l: LogIngest) -> Result<u64, postgres::Error> {
-        conn.execute("INSERT INTO monitoring.log (logtext) VALUES ($1)",
-                     &[&l.log])
-
-    };
-    generic_post(req, auditor, logf)
-}
-*/
 
 fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let mut buffer = String::new();
-    match req.body.read_to_string(&mut buffer) {
-        Ok(_) => {} // no-op
-        Err(_)=> {
-            return Ok(Response::with((status::BadRequest, "unable to read string")))
-        }
-    }
 
-    let v: Result<MeasureIngest, serde_json::Error> = serde_json::from_str(&buffer);
-    match v {
-        Ok(deserialized) => {
-            let conn = connect_to_db(&auditor);
-            match conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
-                               &[&deserialized.name, &deserialized.measurement, &deserialized.dict]) {
-                Ok(_) =>
-                    Ok(Response::with((status::Ok, "ok"))),
-                Err(_) => {
-                    auditor.debug(audit::event("error", "true"));
-                    Ok(Response::with((status::BadGateway, "server error")))
-                }
-            }
-        }
-        Err(_) => {
-            auditor.debug(audit::event("error", "true"));
-            Ok(Response::with((status::BadRequest, "bad parse and cast")))
-        }
-    }
+    let f = |conn: postgres::Connection, l: MeasureIngest| -> Result<u64, postgres::Error> {
+        conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
+                     &[&l.name, &l.measurement, &l.dict])
+
+    };
+
+    generic_post(req, auditor, f)
 }
 
 fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
@@ -158,13 +138,14 @@ fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
 }
 
 fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let conn = connect_to_db(&auditor);
-    let mut buffer = String::new();
-    req.body.read_to_string(&mut buffer);
-    let deserialized: EventIngest = serde_json::from_str(&buffer).unwrap();
-    conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)", &[&deserialized.name, &deserialized.dict]).unwrap();
-    auditor.debug(audit::Event::new("event", "inserted"));
-    Ok(Response::with((status::Ok, "ok")))
+
+    let f = |conn: postgres::Connection, l: EventIngest| -> Result<u64, postgres::Error> {
+        conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)",
+                     &[&l.name, &l.dict])
+
+    };
+
+    generic_post(req, auditor, f)
 }
 
 fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
@@ -211,6 +192,7 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     router.get("/api/v1/measure", move |req: &mut Request| -> IronResult<Response> {
         getmeasure(req, &auditor)
     }, "measure");
+
 
     auditor.info(audit::event("server starting", &format!("{}", server_options.port)));
 
@@ -270,8 +252,6 @@ impl PostgresClientArgs {
 
 fn connect_to_db(auditor: &audit::Audit) -> postgres::Connection {
     let cs = PostgresClientArgs::from_env().connection_string();
-    println!("CS: {}", &cs);
-    auditor.tell(&audit::Concern::Info(audit::Event::new("starting", "pg conn")));
     let conn = Connection::connect(cs, TlsMode::None).unwrap();
     auditor.tell(&audit::Concern::Info(audit::Event::new("started", "pg conn")));
 

@@ -67,7 +67,8 @@ pub enum Concern {
 
 #[derive(Copy, Clone)]
 pub enum AuditTarget {
-    stderr
+    Stderr(),
+    Noop()
 }
 #[derive(Copy, Clone)]
 pub struct Audit {
@@ -76,8 +77,8 @@ pub struct Audit {
 }
 
 impl Audit {
-    pub fn new(c: ConcernLevel)->Audit {
-        Audit { level: c, t: AuditTarget::stderr }
+    pub fn new(c: ConcernLevel) -> Audit {
+        Audit { level: c, t: AuditTarget::Stderr() }
     }
 
     pub fn debug(&self, event: Event) {
@@ -92,13 +93,12 @@ impl Audit {
     pub fn tell(&self, c: &Concern) {
 
         match &self.t {
-            stderr => {
-                use audit::Concern::{Debug, Info, Crisis};
+            AuditTarget::Stderr() => {
                 let mut stderr = std::io::stderr();
                 let (level, e) = match c {
-                    Debug(e) => ("DEBUG", e),
-                    Info(e) => ("INFO", e),
-                    Crisis(e) => ("CRISIS", e)
+                    Concern::Debug(e) => ("DEBUG", e),
+                    Concern::Info(e) => ("INFO", e),
+                    Concern::Crisis(e) => ("CRISIS", e)
                 };
 
                 match writeln!(&mut stderr, "{}: {}: {:?}", e.time, level, e.data) {
@@ -106,6 +106,7 @@ impl Audit {
                     Ok(_) => ()
                 }
             }
+            AuditTarget::Noop() => {}
         }
     }
 }
