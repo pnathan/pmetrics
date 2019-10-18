@@ -27,8 +27,9 @@ struct MeasureIngest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct LogIngest {
-    log:  String,
+struct Measure {
+    d: MeasureIngest,
+    insertion_time: DateTime<Utc>
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,19 +37,6 @@ struct EventIngest {
     name: String,
     dict: Value
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Measure {
-    d: MeasureIngest,
-    insertion_time: DateTime<Utc>
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Log {
-    d: LogIngest,
-    insertion_time: DateTime<Utc>
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Event {
     d: EventIngest,
@@ -112,26 +100,29 @@ fn bigpost(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
 }
 */
 
-fn postlog(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-
-    let conn = connect_to_db(&auditor);
+fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     let mut buffer = String::new();
-    req.body.read_to_string(&mut buffer);
-    let v: Result<LogIngest, serde_json::Error> = serde_json::from_str(&buffer);
+    match req.body.read_to_string(&mut buffer) {
+        Ok(_) => {} // no-op
+        Err(_)=> {
+            return Ok(Response::with((status::BadRequest, "unable to read string")))
+        }
+    }
+
+    let v: Result<MeasureIngest, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
-            match conn.execute("INSERT INTO monitoring.log (logtext) VALUES ($1)",
-                               &[&deserialized.log]) {
-                Ok(_) => {
-                    Ok(Response::with((status::Ok, "ok")))
-                }
+            let conn = connect_to_db(&auditor);
+            match conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
+                               &[&deserialized.name, &deserialized.measurement, &deserialized.dict]) {
+                Ok(_) =>
+                    Ok(Response::with((status::Ok, "ok"))),
                 Err(_) => {
                     auditor.debug(audit::event("error", "true"));
                     Ok(Response::with((status::BadGateway, "server error")))
                 }
             }
         }
-
         Err(_) => {
             auditor.debug(audit::event("error", "true"));
             Ok(Response::with((status::BadRequest, "bad parse and cast")))
@@ -139,63 +130,31 @@ fn postlog(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     }
 }
 
-fn getlog(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     let conn = connect_to_db(&auditor);
-    let mut vec: Vec<Log> = Vec::new();
-    match conn.query("SELECT insertion_time, logtext from monitoring.log order by insertion_time desc limit 100", &[]) {
+    let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100";
+    match conn.query(query, &[]) {
         Ok(rows) => {
+            let mut vec: Vec<Measure> = Vec::new();
             for row in &rows {
-                vec.push(Log {
+                vec.push(Measure {
                     insertion_time: row.get(0),
-                    d: LogIngest {
-                        log: row.get(1),
+                    d: MeasureIngest {
+                        name: row.get(1),
+                        measurement: row.get(2),
+                        dict: row.get(3)
                     }
                 });
             }
-
-            // This should not be a problematic unwrap... right...?
             let result = serde_json::to_string(&vec).unwrap();
+            auditor.debug(audit::event("ending", "http connection"));
             Ok(Response::with((status::Ok, result)))
         }
         Err(e) => {
+            auditor.crisis(audit::eventw(&["error", "true", "module", "db", "error", format!("{:?}", e).as_str(), "query", &query]));
             Ok(Response::with((status::InternalServerError, "server error, can't get data")))
         }
     }
-}
-
-
-fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let conn = connect_to_db(&auditor);
-    auditor.debug(audit::event("started", "http connection"));
-    let mut buffer = String::new();
-    req.body.read_to_string(&mut buffer);
-    let deserialized: MeasureIngest = serde_json::from_str(&buffer).unwrap();
-    conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
-                 &[&deserialized.name, &deserialized.measurement, &deserialized.dict]).unwrap();
-    auditor.debug(audit::event("ending", "http connection"));
-    Ok(Response::with((status::Ok, "ok")))
-}
-
-fn getmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let conn = connect_to_db(&auditor);
-    auditor.debug(audit::event("started", "http connection"));
-
-    let mut vec: Vec<Measure> = Vec::new();
-
-    for row in &conn.query("SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100", &[]).unwrap() {
-        vec.push(Measure {
-            insertion_time: row.get(0),
-            d: MeasureIngest {
-                name: row.get(1),
-                measurement: row.get(2),
-                dict: row.get(3)
-            }
-        });
-    }
-
-    let result = serde_json::to_string(&vec).unwrap();
-    auditor.debug(audit::event("ending", "http connection"));
-    Ok(Response::with((status::Ok, result)))
 }
 
 fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
@@ -208,7 +167,7 @@ fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
     Ok(Response::with((status::Ok, "ok")))
 }
 
-fn getevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     let conn = connect_to_db(&auditor);
     auditor.debug(audit::event("started", "http connection"));
 
@@ -229,9 +188,7 @@ fn getevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     Ok(Response::with((status::Ok, result)))
 }
 
-fn handler(req: &mut Request) -> IronResult<Response> {
-
-    //let ref query = req.extensions.get::<Router>().unwrap().find("query").unwrap_or("/");
+fn handler(_req: &mut Request) -> IronResult<Response> {
     Ok(Response::with((status::Ok, "welcome to pmetrics")))
 }
 
@@ -248,20 +205,14 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
         getevent(req, &auditor)
     }, "event");
 
-
-    router.post("/api/v1/log", move |req: &mut Request| -> IronResult<Response> {
-        postlog(req, &auditor)
-    }, "log");
-    router.get("/api/v1/log", move |req: &mut Request| -> IronResult<Response> {
-        getlog(req, &auditor)
-    }, "log");
-
     router.post("/api/v1/measure", move |req: &mut Request| -> IronResult<Response> {
         postmeasure(req, &auditor)
     }, "measure");
     router.get("/api/v1/measure", move |req: &mut Request| -> IronResult<Response> {
         getmeasure(req, &auditor)
     }, "measure");
+
+    auditor.info(audit::event("server starting", &format!("{}", server_options.port)));
 
     Iron::new(router)
         .http(format!("localhost:{}", server_options.port))

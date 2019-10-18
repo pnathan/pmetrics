@@ -1,5 +1,5 @@
 [package]
-name = "pmetrics-web"
+name = "pmetrics"
 version = "0.1.0"
 authors = ["Paul Nathan <paul@nathan.house>"]
 
@@ -7,6 +7,8 @@ authors = ["Paul Nathan <paul@nathan.house>"]
 default = ["postgres/with-serde_json", "postgres/with-chrono"]
 [dependencies]
 
+either = "1.5"
+itertools = "0.8.0"
 iron = "*"
 router = "*"
 
