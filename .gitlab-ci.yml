@@ -5,4 +5,4 @@ run-build:
   stage: build
   image: rust:latest
   script:
-    - "cd pmetrics-web && cargo build"
+    - "./release.sh"
