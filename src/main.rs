@@ -7,23 +7,23 @@ extern crate postgres;
 extern crate clap;
 
 
-use std::collections::HashMap;
-use std::env;
-use std::io::Read;
-
+use std::io;
+use std::io::{Read};
+use std::fs::File;
 use chrono::prelude::{DateTime, Utc};
 use clap::{Arg, App, SubCommand};
 use iron::prelude::{IronResult, Request, Response, Iron};
 use iron::status;
-use postgres::{Connection, TlsMode};
+use postgres::Connection;
 use router::Router;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
 use serde_json::{Value};
 
+mod db;
 mod audit;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct MeasureIngest {
     name: String,
     measurement: f64,
@@ -36,7 +36,7 @@ struct Measure {
     insertion_time: DateTime<Utc>
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct EventIngest {
     name: String,
     dict: Value
@@ -68,7 +68,7 @@ fn generic_post<'a, T, F>(req: &'a mut Request,
                           auditor: &audit::Audit,
                           insert_function: F) -> IronResult<Response>
 where T: DeserializeOwned,
-      F: Fn(postgres::Connection, T)->Result<u64, postgres::Error>,
+      F: Fn(&postgres::Connection, &T)->Result<u64, postgres::Error>,
 {
     let mut buffer = String::new();
 
@@ -82,8 +82,8 @@ where T: DeserializeOwned,
     let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
-            let conn = connect_to_db(&auditor);
-            match insert_function(conn, deserialized) {
+            let conn = db::connect_to_db(&auditor);
+            match insert_function(&conn, &deserialized) {
                 Ok(_) => {
                     Ok(Response::with((status::Ok, "ok")))
                 }
@@ -101,12 +101,15 @@ where T: DeserializeOwned,
     }
 }
 
+fn writemeasure(conn: &postgres::Connection, l: &MeasureIngest) -> Result<u64, postgres::Error> {
+    conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
+                 &[&l.name, &l.measurement, &l.dict])
+
+}
 fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
 
-    let f = |conn: postgres::Connection, l: MeasureIngest| -> Result<u64, postgres::Error> {
-        conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
-                     &[&l.name, &l.measurement, &l.dict])
-
+    let f = |conn: &postgres::Connection, l: &MeasureIngest| -> Result<u64, postgres::Error> {
+        writemeasure(conn, l)
     };
 
     generic_post(req, auditor, f)
@@ -114,7 +117,7 @@ fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
 
 // TODO: dry up.
 fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let conn = connect_to_db(&auditor);
+    let conn = db::connect_to_db(&auditor);
     let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100";
     match conn.query(query, &[]) {
         Ok(rows) => {
@@ -139,11 +142,15 @@ fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
     }
 }
 
+fn writeevent(conn: &postgres::Connection, l: &EventIngest) -> Result<u64, postgres::Error> {
+    conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)",
+                 &[&l.name, &l.dict])
+}
+
 fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
 
-    let f = |conn: postgres::Connection, l: EventIngest| -> Result<u64, postgres::Error> {
-        conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)",
-                     &[&l.name, &l.dict])
+    let f = |conn: &postgres::Connection, l: &EventIngest| -> Result<u64, postgres::Error> {
+        writeevent(conn, l)
 
     };
 
@@ -151,7 +158,7 @@ fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
 }
 
 fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
-    let conn = connect_to_db(&auditor);
+    let conn = db::connect_to_db(&auditor);
     auditor.debug(audit::event("started", "http connection"));
 
     let mut vec: Vec<Event> = Vec::new();
@@ -204,62 +211,59 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
 }
 
 
-struct PostgresClientArgs {
-    user: String,
-    password: String,
-    host: String,
-    port: u16,
-    db: String,
+#[derive(Debug, Serialize, Deserialize)]
+enum PipeReader {
+    M(MeasureIngest),
+    E(EventIngest)
 }
 
-impl PostgresClientArgs {
-    fn from_env() -> PostgresClientArgs {
-        let envmap: HashMap<String, String> =  env::vars().into_iter().collect();
-        let pguser = match envmap.get("PGUSER") {
-            Some(s) => s,
-            None => ""
-        };
-        let pgpass = match envmap.get("PGPASSWORD") {
-            Some(s) =>  s,
-            None => ""
-        };
 
-        let pgport = match envmap.get("PGPORT") {
-            Some(s) => s.parse::<u16>().unwrap(),
-            None => 5432
-        };
-        let pghost = match envmap.get("PGHOST") {
-            Some(s) => s,
-            None => "localhost"
-        };
-        let pgdb = match envmap.get("PGDATABASE") {
-            Some(s) => s,
-            None => "postgres"
-        };
+fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
+    let auditor  = audit::Audit::new(*cl);
+    let conn = db::connect_to_db(&auditor);
 
-        PostgresClientArgs {
-            user: pguser.to_string(),
-            password: pgpass.to_string(),
-            host: pghost.to_string(),
-            port: pgport,
-            db: pgdb.to_string()
+    let mut file = match filename.as_str() {
+        "-" => io::stdin(),
+        // crashing here is ok if we can't open it.
+        _ => File::open(filename).unwrap()
+    };
+
+
+    loop {
+        let mut buffer = String::new();
+        let result = file.read_to_string(&mut buffer);
+
+        match result {
+          Ok(bytecount) =>
+                if bytecount > 0 {
+                    let v: Result<Vec<PipeReader>, serde_json::Error> = serde_json::from_str(&buffer);
+
+                    match v {
+                        Ok(dataz) => {
+                            for row in &dataz {
+                                match row {
+                                    PipeReader::M(measure) => {
+                                        writemeasure(&conn,measure);
+                                    }
+                                    PipeReader::E(event) => {
+                                        writeevent(&conn, event);
+                                    }
+                                }
+                                auditor.info(audit::event("writes", "I did it!!"));
+                            }
+                        }
+                        Err(e) => {
+                            println!("{:?}", e);
+                        }
+                    }
+                }
+            Err(e) => {
+                auditor.info(audit::event("err", &format!("{:?}", e)));
+            }
         }
-    }
 
-    fn connection_string(&self) -> String {
-        format!("postgres://{}:{}@{}:{}/{}", self.user, self.password, self.host, self.port, self.db)
     }
 }
-
-
-fn connect_to_db(auditor: &audit::Audit) -> postgres::Connection {
-    let cs = PostgresClientArgs::from_env().connection_string();
-    let conn = Connection::connect(cs, TlsMode::None).unwrap();
-    auditor.tell(&audit::Concern::Info(audit::Event::new("started", "pg conn")));
-
-    conn
-}
-
 
 #[derive(Copy, Clone)]
 struct GlobalOptions {
@@ -267,15 +271,17 @@ struct GlobalOptions {
 }
 
 enum ServerType {
-    Http,
-    NamedPipe
+    Http
+}
+struct CliOptions {
+    filename: String
 }
 struct ServerOptions {
     port: u16
 }
 
 enum Command {
-    CliClient(GlobalOptions),
+    CliClient(GlobalOptions, CliOptions),
     Server(GlobalOptions, ServerOptions, ServerType),
     Debugger(GlobalOptions)
 }
@@ -297,6 +303,12 @@ fn clapparser() -> Command {
                          .short("p")
                          .takes_value(true)
                          .help("server port")))
+        .subcommand(SubCommand::with_name("cliput")
+                    .about("cli putter. waits on STDIN for json blocks to be sent")
+                    .arg(Arg::with_name("file")
+                         .short("f")
+                         .takes_value(true)
+                         .help("file: can be ordinary or a named pipe. STDIN is used when not specified")))
         .get_matches();
 
     let cl = match matches.occurrences_of("v") {
@@ -312,8 +324,7 @@ fn clapparser() -> Command {
         let servertype = matches.value_of("type").unwrap();
         let st = match servertype  {
             "http" => ServerType::Http,
-            "pipe" => ServerType::NamedPipe,
-            _ => panic!("Unable to start server, crashing. specify type http or pipe")
+            _ => panic!("Unable to start server, crashing. specify type http")
         };
 
         let port = matches.value_of("port").unwrap_or("1337").parse::<u16>().unwrap();
@@ -321,6 +332,12 @@ fn clapparser() -> Command {
 
         return Command::Server(go, so, st)
     }
+
+    if let Some(_matches) = matches.subcommand_matches("cliput") {
+        let filename = matches.value_of("file").unwrap_or("-");
+        return Command::CliClient(go, CliOptions { filename: filename.to_string() })
+    }
+
     panic!("what! run --help please!")
 }
 
@@ -330,7 +347,7 @@ fn main() {
     let cl = match cmd {
         Command::Server(go, _, _) => go.verbosity,
         Command::Debugger(go) => go.verbosity,
-        Command::CliClient(go) => go.verbosity
+        Command::CliClient(go, _) => go.verbosity
     };
 
     match cmd {
@@ -344,7 +361,7 @@ fn main() {
         Command::Debugger(_) => {
 
             let auditor  = audit::Audit::new(cl);
-            let conn = connect_to_db(&auditor);
+            let conn = db::connect_to_db(&auditor);
 
             for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event", &[]).unwrap() {
                 let event = Event{
@@ -357,10 +374,8 @@ fn main() {
                 println!("event: {:?}", event);
             }
         }
-        Command::CliClient(_) => {
-            // we should take STDIN or PIPE events
-            println!("CLI NOT IMPLEMENTED");
-
+        Command::CliClient(_, clioptions) => {
+            launch_writer(&cl, clioptions.filename)
         }
     }
 }
