@@ -14,6 +14,7 @@ use chrono::prelude::{DateTime, Utc};
 use audit::itertools::Itertools;
 use audit::either::{Either, Right, Left};
 
+#[derive(PartialEq, Debug)]
 pub struct Event {
     time: DateTime<Utc>,
     // Left: KV - Right - Vec of KVs
@@ -21,12 +22,14 @@ pub struct Event {
 }
 
 impl Event {
+    // new event with 1 kv pair
     pub fn new(k: &str, v: &str) -> Event {
         Event {
             time: Utc::now(),
             data: Left((k.to_string(),v.to_string()))
         }
     }
+    // new event with multiple kv pairs.
     pub fn newvec(pairs: &[&str]) -> Event {
         let mut kvs: Vec<(String, String)> = Vec::new();
         for chunk in &pairs.into_iter().chunks(2) {
@@ -40,13 +43,13 @@ impl Event {
             time: Utc::now(),
             data: Right(kvs)
         }
-
     }
 }
 
 pub fn event(k: &str, v: &str) -> Event {
     Event::new(k,v)
 }
+
 
 pub fn eventw(kvs:  &[&str]) -> Event {
     Event::newvec(kvs)
@@ -94,13 +97,34 @@ impl Audit {
 
         match &self.t {
             AuditTarget::Stderr() => {
-                let mut stderr = std::io::stderr();
+
+                match &self.level {
+                    // pass everything through
+                    ConcernLevel::Debug => {}
+
+                    // short-circuit on Debug
+                    ConcernLevel::Info =>  match c {
+                        Concern::Debug(_) => {
+                            return
+                        }
+                        _ => {}
+                    }
+
+                    ConcernLevel::Crisis =>  match c {
+                        // Only keep going on Crisis.
+                        Concern::Crisis(_) => {}
+                        _ =>  return
+                    }
+                }
+
                 let (level, e) = match c {
                     Concern::Debug(e) => ("DEBUG", e),
                     Concern::Info(e) => ("INFO", e),
                     Concern::Crisis(e) => ("CRISIS", e)
                 };
 
+
+                let mut stderr = std::io::stderr();
                 match writeln!(&mut stderr, "{}: {}: {:?}", e.time, level, e.data) {
                     Err(e) => panic!("writing to stderr failed, invariant failed, crashing: {}", e),
                     Ok(_) => ()
@@ -108,5 +132,42 @@ impl Audit {
             }
             AuditTarget::Noop() => {}
         }
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_newevent() {
+        let gotten = event("a", "b");
+        let expected = Event {
+            time: gotten.time,
+            data: Left(("a".to_string(), "b".to_string()))
+        };
+        assert_eq!(expected, gotten);
+    }
+
+    #[test]
+    fn test_newevent_w()
+    {
+        let gotten = eventw(&["a", "b", "c", "d"]);
+        let expected = Event {
+            time: gotten.time,
+            data: Right([("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())].to_vec())
+        };
+        assert_eq!(expected, gotten);
+    }
+
+    #[test]
+    fn test_target() {
+        let a = Audit {
+            level: ConcernLevel::Crisis,
+            t: AuditTarget::Noop()
+        };
+        a.tell(&Concern::Debug(event("a", "b")));
     }
 }
