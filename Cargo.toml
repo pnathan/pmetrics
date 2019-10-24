@@ -10,7 +10,7 @@ default = ["postgres/with-serde_json", "postgres/with-chrono"]
 clap = "2.33"
 either = "1.5"
 itertools = "0.8.0"
-iron = "*"
+iron = "^0.6"
 router = "*"
 
 serde = { version = "^1.0", features = ["derive"] }

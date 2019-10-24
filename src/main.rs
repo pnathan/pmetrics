@@ -10,11 +10,12 @@ extern crate clap;
 use std::io;
 use std::io::{Read};
 use std::fs::File;
+use std::{thread, time};
+
 use chrono::prelude::{DateTime, Utc};
 use clap::{Arg, App, SubCommand};
 use iron::prelude::{IronResult, Request, Response, Iron};
 use iron::status;
-use postgres::Connection;
 use router::Router;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
@@ -31,6 +32,14 @@ struct MeasureIngest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct IntrusiveMeasure {
+    insertion_time: DateTime<Utc>,
+    name: String,
+    measurement: f64,
+    dict: Value
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Measure {
     d: MeasureIngest,
     insertion_time: DateTime<Utc>
@@ -41,6 +50,14 @@ struct EventIngest {
     name: String,
     dict: Value
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IntrusiveEvent {
+    insertion_time: DateTime<Utc>,
+    name: String,
+    dict: Value
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Event {
     d: EventIngest,
@@ -151,7 +168,6 @@ fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
 
     let f = |conn: &postgres::Connection, l: &EventIngest| -> Result<u64, postgres::Error> {
         writeevent(conn, l)
-
     };
 
     generic_post(req, auditor, f)
@@ -159,8 +175,6 @@ fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
 
 fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
     let conn = db::connect_to_db(&auditor);
-    auditor.debug(audit::event("started", "http connection"));
-
     let mut vec: Vec<Event> = Vec::new();
 
     for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event order by insertion_time desc limit 100", &[]).unwrap() {
@@ -174,7 +188,6 @@ fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
     }
 
     let result = serde_json::to_string(&vec).unwrap();
-    auditor.debug(audit::event("ending", "http connection"));
     Ok(Response::with((status::Ok, result)))
 }
 
@@ -211,6 +224,49 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
 }
 
 
+fn launch_query(cl: &audit::ConcernLevel, qo: &QueryOptions) {
+    let auditor  = audit::Audit::new(*cl);
+    let conn = db::connect_to_db(&auditor);
+    println!("{:?}", qo);
+    // pg / rust-postgres demand i64 as the type to be passed in.
+    let last: i64 = qo.last.into();
+    let printable = match qo.metric_type {
+        MetricTypeOption::E => {
+            let mut vec: Vec<IntrusiveEvent> = Vec::new();
+            let query = "SELECT insertion_time, name, dict from monitoring.event
+order by insertion_time desc
+limit $1";
+            for row in &conn.query(query, &[&last]).unwrap() {
+                vec.push(IntrusiveEvent {
+                    insertion_time: row.get(0),
+                    name: row.get(1),
+                    dict: row.get(2)
+                });
+            }
+            serde_json::to_string_pretty(&vec).unwrap()
+        }
+        MetricTypeOption::M => {
+            let mut vec: Vec<IntrusiveMeasure> = Vec::new();
+            let query = "SELECT insertion_time, name, measurement, dict
+from monitoring.measure
+order by insertion_time desc
+limit $1";
+            for row in &conn.query(query, &[&last]).unwrap() {
+                vec.push(IntrusiveMeasure {
+                    insertion_time: row.get(0),
+                    name: row.get(1),
+                    measurement: row.get(2),
+                    dict: row.get(3)
+                });
+            }
+
+            serde_json::to_string_pretty(&vec).unwrap()
+        }
+    };
+
+    println!("{}", printable);
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 enum PipeReader {
     M(MeasureIngest),
@@ -222,20 +278,26 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
     let auditor  = audit::Audit::new(*cl);
     let conn = db::connect_to_db(&auditor);
 
-    let mut file = match filename.as_str() {
-        "-" => io::stdin(),
+    let mut file: Box<dyn Read> = match filename.as_str() {
+        "-" => Box::new(io::stdin()),
         // crashing here is ok if we can't open it.
-        _ => File::open(filename).unwrap()
+        _ => {
+            auditor.info(audit::event("opening", &filename));
+            Box::new(File::open(filename).unwrap())
+        }
     };
-
 
     loop {
         let mut buffer = String::new();
-        let result = file.read_to_string(&mut buffer);
 
+        // this frankly should be epoll based for a named pipe, but
+        // let's let it live for now. If this is a _useful_ system, we
+        // can do more with it.
+        let result = file.read_to_string(&mut buffer);
         match result {
           Ok(bytecount) =>
                 if bytecount > 0 {
+                    auditor.info(audit::event("status", "rx"));
                     let v: Result<Vec<PipeReader>, serde_json::Error> = serde_json::from_str(&buffer);
 
                     match v {
@@ -243,17 +305,17 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        writemeasure(&conn,measure);
+                                        writemeasure(&conn,measure).unwrap();
                                     }
                                     PipeReader::E(event) => {
-                                        writeevent(&conn, event);
+                                        writeevent(&conn, event).unwrap();
                                     }
                                 }
-                                auditor.info(audit::event("writes", "I did it!!"));
+                                auditor.info(audit::event("status", "written"));
                             }
                         }
                         Err(e) => {
-                            println!("{:?}", e);
+                            auditor.crisis(audit::event("err", &format!("{:?}", e)));
                         }
                     }
                 }
@@ -262,6 +324,9 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
             }
         }
 
+        // One second pulled out of thin air.
+        let one = time::Duration::from_secs(1);
+        thread::sleep(one);
     }
 }
 
@@ -273,42 +338,94 @@ struct GlobalOptions {
 enum ServerType {
     Http
 }
+
 struct CliOptions {
     filename: String
 }
+
 struct ServerOptions {
     port: u16
 }
 
+#[derive(Debug)]
+enum OutputFormat {
+    Json,
+    Table
+}
+
+#[derive(Debug)]
+enum MetricTypeOption {
+    M, E
+}
+
+enum MetricType {
+    M(Measure),
+    E(Event)
+}
+
+#[derive(Debug)]
+struct QueryOptions {
+    metric_type: MetricTypeOption,
+    last: u16,
+    streaming: bool,
+    format: OutputFormat
+}
+
 enum Command {
-    CliClient(GlobalOptions, CliOptions),
+    PipeReader(GlobalOptions, CliOptions),
     Server(GlobalOptions, ServerOptions, ServerType),
-    Debugger(GlobalOptions)
+    Querier(GlobalOptions, QueryOptions)
 }
 
 fn clapparser() -> Command {
     let matches = App::new("pmetrics")
         .version("0.0.1")
-        .about("an o11y system")
+        .about("an observability system")
         .arg(Arg::with_name("v")
              .short("v")
              .multiple(true)
-             .help("verbosity - 0,1,2 being valid values "))
+             .help("verbosity - repeating it 1 or 2 times is possible "))
         .subcommand(SubCommand::with_name("server")
                     .about("server")
                     .arg(Arg::with_name("type")
                          .required(true)
-                         .help("type of server"))
+                         .help("type of server - http the only supported server type"))
                     .arg(Arg::with_name("port")
                          .short("p")
+                         .long("port")
                          .takes_value(true)
                          .help("server port")))
-        .subcommand(SubCommand::with_name("cliput")
-                    .about("cli putter. waits on STDIN for json blocks to be sent")
+        .subcommand(SubCommand::with_name("piper")
+                    .about("pipe reader. waits on STDIN/pipe/file for json blocks to be sent")
                     .arg(Arg::with_name("file")
                          .short("f")
+                         .long("file")
                          .takes_value(true)
                          .help("file: can be ordinary or a named pipe. STDIN is used when not specified")))
+        .subcommand(SubCommand::with_name("q")
+                    .about("querier: pre-alpha edition. Probably will change drastically")
+                    // CONSIDER what it would take to have a DSL here.
+                    .arg(Arg::with_name("type")
+                         .short("t")
+                         .long("type")
+                         .takes_value(true)
+                         .required(true)
+                         .help("metric type - (m)easure or (e)vent"))
+                    .arg(Arg::with_name("last")
+                         .short("l")
+                         .long("last")
+                         .takes_value(true)
+                         .help("`n` most recent, by db time, of the event. Defaults to 10"))
+                    .arg(Arg::with_name("output_format")
+                         .short("f")
+                         .long("format")
+                         .takes_value(true)
+                         .help("output format: [table|json] - json default - TABLE UNIMPLEMENTED"))
+                    .arg(Arg::with_name("stream")
+                         .long("stream")
+                         .short("w")
+                         .takes_value(true)
+                         .help("tail the events [UNIMPLEMENTED]")))
         .get_matches();
 
     let cl = match matches.occurrences_of("v") {
@@ -318,24 +435,53 @@ fn clapparser() -> Command {
     };
 
     let go = GlobalOptions { verbosity: cl };
+    {
 
-    if let Some(matches) = matches.subcommand_matches("server") {
+        if let Some(matches) = matches.subcommand_matches("server") {
 
-        let servertype = matches.value_of("type").unwrap();
-        let st = match servertype  {
-            "http" => ServerType::Http,
-            _ => panic!("Unable to start server, crashing. specify type http")
-        };
+            let servertype = matches.value_of("type").unwrap();
+            let st = match servertype  {
+                "http" => ServerType::Http,
+                _ => panic!("Unable to start server, crashing. specify type http")
+            };
 
-        let port = matches.value_of("port").unwrap_or("1337").parse::<u16>().unwrap();
-        let so = ServerOptions { port: port };
+            let port = matches.value_of("port").unwrap_or("1337").parse::<u16>().unwrap();
+            let so = ServerOptions { port: port };
 
-        return Command::Server(go, so, st)
+            return Command::Server(go, so, st)
+        }
     }
+    {
+        if let Some(matches) = matches.subcommand_matches("piper") {
+            let filename = matches.value_of("file").unwrap();
+            return Command::PipeReader(go, CliOptions { filename: filename.to_string() })
+        }
 
-    if let Some(_matches) = matches.subcommand_matches("cliput") {
-        let filename = matches.value_of("file").unwrap_or("-");
-        return Command::CliClient(go, CliOptions { filename: filename.to_string() })
+    }
+    {
+        if let Some(matches) = matches.subcommand_matches("q") {
+            let metric_type = match matches.value_of("type").unwrap() {
+                "m" => MetricTypeOption::M,
+                "e" => MetricTypeOption::E,
+                _ => panic!("not a valid metric type - try m or e")
+            };
+
+            let last = matches.value_of("last").unwrap_or("10").parse::<u16>().unwrap();
+            let format = match matches.value_of("output_format").unwrap_or("json") {
+                "json" => OutputFormat::Json,
+                "table" => OutputFormat::Table,
+                _ => panic!("not a valid output format - try json or table")
+            };
+
+            let qo = QueryOptions {
+                metric_type: metric_type,
+                last: last,
+                streaming: false,
+                format: format
+
+            };
+            return Command::Querier(go, qo)
+        }
     }
 
     panic!("what! run --help please!")
@@ -346,36 +492,21 @@ fn main() {
 
     let cl = match cmd {
         Command::Server(go, _, _) => go.verbosity,
-        Command::Debugger(go) => go.verbosity,
-        Command::CliClient(go, _) => go.verbosity
+        Command::PipeReader(go, _) => go.verbosity,
+        Command::Querier(go, _) => go.verbosity
     };
 
     match cmd {
         Command::Server(_, server_options, servertype) => {
             match servertype {
                 ServerType::Http => launch_server(&cl, &server_options),
-                    _ =>  panic!("inpossible code")
             }
         }
-
-        Command::Debugger(_) => {
-
-            let auditor  = audit::Audit::new(cl);
-            let conn = db::connect_to_db(&auditor);
-
-            for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event", &[]).unwrap() {
-                let event = Event{
-                    insertion_time: row.get(0),
-                    d: EventIngest {
-                        name: row.get(1),
-                        dict: row.get(2)
-                    }
-                };
-                println!("event: {:?}", event);
-            }
-        }
-        Command::CliClient(_, clioptions) => {
+        Command::PipeReader(_, clioptions) => {
             launch_writer(&cl, clioptions.filename)
+        }
+        Command::Querier(_, qo) => {
+            launch_query(&cl, &qo)
         }
     }
 }
