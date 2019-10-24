@@ -219,7 +219,7 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     auditor.info(audit::event("server starting", &format!("{}", server_options.port)));
 
     Iron::new(router)
-        .http(format!("localhost:{}", server_options.port))
+        .http(format!("0.0.0.0:{}", server_options.port))
         .unwrap();
 }
 

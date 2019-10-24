@@ -6,3 +6,12 @@ services:
       POSTGRES_PASSWORD: aargh
     ports:
       - "5432:5432"
+  pmetrics:
+    build: .
+    environment:
+      PGPASSWORD: aargh
+      PGHOST: pg
+      PGUSER: postgres
+      PGDATABASE: postgres
+    ports:
+      - "1337:1337"
