@@ -13,8 +13,9 @@ trap cleanup EXIT
 
 # spawn this reader. Presumes pmetrics is on the path. Presumes piper
 # has connection to psql ready to go via env vars.
-pmetrics piper -f "${D}/convey" &
-# now send the piper data
+pmetrics piper -f "${D}/convey" & # TODO: fix this hanging-around
+                                  # process when the script exits.
+                                  # now send the piper data
 while true; do
     while read URL; do
         echo "Acquiring data from $URL"
