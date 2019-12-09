@@ -1,6 +1,11 @@
+/**
+pmetrics entry point
+**/
+#[macro_use] extern crate nickel;
+
+
+
 extern crate chrono;
-extern crate iron;
-extern crate router;
 extern crate serde;
 extern crate serde_json;
 extern crate postgres;
@@ -14,9 +19,8 @@ use std::{thread, time};
 
 use chrono::prelude::{DateTime, Utc};
 use clap::{Arg, App, SubCommand};
-use iron::prelude::{IronResult, Request, Response, Iron};
-use iron::status;
-use router::Router;
+use nickel::status::StatusCode;
+use nickel::{Nickel, QueryString, HttpRouter, Request};
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
 use serde_json::{Value};
@@ -83,49 +87,54 @@ struct Event {
 
 fn generic_post<'a, T, F>(req: &'a mut Request,
                           auditor: &audit::Audit,
-                          insert_function: F) -> IronResult<Response>
+                          insert_function: F) ->
+    (nickel::status::StatusCode, String)
 where T: DeserializeOwned,
       F: Fn(&postgres::Connection, &T)->Result<u64, postgres::Error>,
 {
     let mut buffer = String::new();
 
-    match req.body.read_to_string(&mut buffer) {
+    match req.origin.read_to_string(&mut buffer) {
         Ok(_) => {} // no-op
         Err(_)=> {
             auditor.info(audit::eventw(&["error", "true", "module", "web", "class", "string read"]));
-            return Ok(Response::with((status::BadRequest, "unable to read string")))
+            return (StatusCode::BadRequest, "unable to read string".to_string());
         }
     }
+
     let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
             let conn = db::connect_to_db(&auditor);
             match insert_function(&conn, &deserialized) {
                 Ok(_) => {
-                    Ok(Response::with((status::Ok, "ok")))
+                    (StatusCode::Ok, "ok".to_string())
                 }
                 Err(_) => {
                     auditor.info(audit::eventw(&["error", "true","module", "web",  "class", "db insert"]));
-                    Ok(Response::with((status::BadGateway, "server error")))
+                    (StatusCode::BadGateway, "server error".to_string())
                 }
             }
         }
 
         Err(_) => {
             auditor.info(audit::eventw(&["error", "true", "module", "web",  "class", "deserialize/parse"]));
-            Ok(Response::with((status::BadRequest, "bad parse and cast")))
+            (StatusCode::BadRequest, "bad parse and cast".to_string())
         }
     }
 }
 
-fn writemeasure(conn: &postgres::Connection, l: &MeasureIngest) -> Result<u64, postgres::Error> {
+fn writemeasure(conn: &postgres::Connection, l: &MeasureIngest) ->
+    Result<u64, postgres::Error> {
     conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
                  &[&l.name, &l.measurement, &l.dict])
 
 }
-fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn postmeasure(req: &mut Request, auditor: &audit::Audit) ->
+    (nickel::status::StatusCode, String) {
 
-    let f = |conn: &postgres::Connection, l: &MeasureIngest| -> Result<u64, postgres::Error> {
+        let f = |conn: &postgres::Connection, l: &MeasureIngest| ->
+            Result<u64, postgres::Error> {
         writemeasure(conn, l)
     };
 
@@ -133,7 +142,8 @@ fn postmeasure(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
 }
 
 // TODO: dry up.
-fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn getmeasure(_req: &mut Request, auditor: &audit::Audit) ->
+    (nickel::status::StatusCode, String) {
     let conn = db::connect_to_db(&auditor);
     let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100";
     match conn.query(query, &[]) {
@@ -150,21 +160,23 @@ fn getmeasure(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response
                 });
             }
             let result = serde_json::to_string(&vec).unwrap();
-            Ok(Response::with((status::Ok, result)))
+            (StatusCode::Ok, result)
         }
         Err(e) => {
             auditor.crisis(audit::eventw(&["error", "true", "module", "db", "error", format!("{:?}", e).as_str(), "query", &query]));
-            Ok(Response::with((status::InternalServerError, "server error, can't get data")))
+            (StatusCode::InternalServerError, "server error, can't get data".to_string())
         }
     }
 }
 
-fn writeevent(conn: &postgres::Connection, l: &EventIngest) -> Result<u64, postgres::Error> {
+fn writeevent(conn: &postgres::Connection, l: &EventIngest) ->
+    Result<u64, postgres::Error> {
     conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)",
                  &[&l.name, &l.dict])
 }
 
-fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn postevent(req: &mut Request, auditor: &audit::Audit) ->
+    (nickel::status::StatusCode, String) {
 
     let f = |conn: &postgres::Connection, l: &EventIngest| -> Result<u64, postgres::Error> {
         writeevent(conn, l)
@@ -173,7 +185,8 @@ fn postevent(req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
     generic_post(req, auditor, f)
 }
 
-fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> {
+fn getevent(_req: &mut Request, auditor: &audit::Audit) ->
+    (nickel::status::StatusCode, String) {
     let conn = db::connect_to_db(&auditor);
     let mut vec: Vec<Event> = Vec::new();
 
@@ -188,38 +201,49 @@ fn getevent(_req: &mut Request, auditor: &audit::Audit) -> IronResult<Response> 
     }
 
     let result = serde_json::to_string(&vec).unwrap();
-    Ok(Response::with((status::Ok, result)))
+    (StatusCode::Ok, result)
 }
 
-fn handler(_req: &mut Request) -> IronResult<Response> {
-    Ok(Response::with((status::Ok, "welcome to pmetrics")))
+fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
+    (StatusCode::Ok, "welcome to nickel'd pmetrics".to_string())
 }
+
+struct ApiKeys;
+impl ApiKeys {
+    fn check_keys(&self) {
+    }
+}
+
 
 fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     let auditor  = audit::Audit::new(*cl);
 
-    let mut router = Router::new();
-    router.get("/", handler, "index");
+    let mut server = Nickel::new();
 
-    router.post("/api/v1/event", move |req: &mut Request| -> IronResult<Response> {
+    server.get("/", middleware! { |req|
+                                  handler(req)
+    });
+
+    server.post("/api/v1/event", middleware! { |req|
         postevent(req, &auditor)
-    }, "event");
-    router.get("/api/v1/event", move |req: &mut Request| -> IronResult<Response> {
+    });
+    server.get("/api/v1/event", middleware! { |req|
         getevent(req, &auditor)
-    }, "event");
+    });
 
-    router.post("/api/v1/measure", move |req: &mut Request| -> IronResult<Response> {
+    server.post("/api/v1/measure",  middleware! { |req|
         postmeasure(req, &auditor)
-    }, "measure");
-    router.get("/api/v1/measure", move |req: &mut Request| -> IronResult<Response> {
+    });
+
+    server.get("/api/v1/measure", middleware! { |req|
         getmeasure(req, &auditor)
-    }, "measure");
+    });
 
 
     auditor.info(audit::event("server starting", &format!("{}", server_options.port)));
 
-    Iron::new(router)
-        .http(format!("0.0.0.0:{}", server_options.port))
+    server
+        .listen(format!("0.0.0.0:{}", server_options.port))
         .unwrap();
 }
 
