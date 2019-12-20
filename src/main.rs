@@ -20,7 +20,7 @@ use std::{thread, time};
 use chrono::prelude::{DateTime, Utc};
 use clap::{Arg, App, SubCommand};
 use nickel::status::StatusCode;
-use nickel::{Nickel, QueryString, HttpRouter, Request};
+use nickel::{Nickel,/* QueryString, */HttpRouter, Request, Response, MiddlewareResult};
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
 use serde_json::{Value};
@@ -210,15 +210,43 @@ fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
 
 struct ApiKeys;
 impl ApiKeys {
-    fn check_keys(&self) {
+    fn check_keys(&self, k: &str) -> bool {
+        k == "s3cret"
     }
 }
 
+
+fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
+
+    let path = _req.path_without_query().unwrap();
+    if ! path.contains("api") {
+        return res.next_middleware();
+
+    }
+
+    match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
+        Some(s) => {
+            let gatekeeper = ApiKeys{};
+            let header = &s[0];
+            let key: String = String::from_utf8(header.to_vec()).unwrap();
+            gatekeeper.check_keys(&key);
+        }
+        None =>  {
+            res.set(StatusCode::Forbidden);
+
+            return res.send("\"api key failure\"");
+        }
+    }
+
+    // Pass control to the next middleware
+    res.next_middleware()
+}
 
 fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     let auditor  = audit::Audit::new(*cl);
 
     let mut server = Nickel::new();
+    server.utilize(check_api_keys);
 
     server.get("/", middleware! { |req|
                                   handler(req)
