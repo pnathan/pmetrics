@@ -18,6 +18,7 @@ use audit::either::{Either, Right, Left};
 pub struct Event {
     time: DateTime<Utc>,
     // Left: KV - Right - Vec of KVs
+    // TODO: collapse this. Left should be a vec of length 1.
     data: Either<(String, String), Vec<(String, String)>>
 }
 
@@ -75,8 +76,8 @@ pub enum AuditTarget {
 }
 #[derive(Copy, Clone)]
 pub struct Audit {
-    level: ConcernLevel,
-    t: AuditTarget
+    pub level: ConcernLevel,
+    pub t: AuditTarget
 }
 
 impl Audit {

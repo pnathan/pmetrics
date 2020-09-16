@@ -23,10 +23,45 @@ use nickel::status::StatusCode;
 use nickel::{Nickel,/* QueryString, */HttpRouter, Request, Response, MiddlewareResult};
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
-use serde_json::{Value};
+use serde_json::Value;
+use std::sync::{Arc, Mutex, Once};
+use std::mem;
 
 mod db;
 mod audit;
+
+#[derive(Clone)]
+struct SingletonReader {
+    inner: Arc<Mutex<audit::Audit>>
+}
+impl SingletonReader {
+    fn get(&self) -> audit::Audit {
+        *self.inner.lock().unwrap()
+    }
+}
+
+fn recorder() -> SingletonReader {
+    // !! null pointer.
+    static mut SINGLETON: *const SingletonReader = 0 as *const SingletonReader;
+    static ONCE: Once = Once::new();
+
+    unsafe {
+        ONCE.call_once(|| {
+            // Make it
+            let singleton = SingletonReader {
+                inner: Arc::new(Mutex::new(
+                    audit::Audit{level: audit::ConcernLevel::Crisis, t: audit::AuditTarget::Stderr()}
+                )),
+            };
+
+            // Put it in the heap so it can outlive this call
+            SINGLETON = mem::transmute(Box::new(singleton));
+        });
+
+        // Now we give out a copy of the data that is safe to use concurrently.
+        (*SINGLETON).clone()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct MeasureIngest {
@@ -86,7 +121,6 @@ struct Event {
 // TODO: Write a Search api.
 
 fn generic_post<'a, T, F>(req: &'a mut Request,
-                          auditor: &audit::Audit,
                           insert_function: F) ->
     (nickel::status::StatusCode, String)
 where T: DeserializeOwned,
@@ -97,7 +131,7 @@ where T: DeserializeOwned,
     match req.origin.read_to_string(&mut buffer) {
         Ok(_) => {} // no-op
         Err(_)=> {
-            auditor.info(audit::eventw(&["error", "true", "module", "web", "class", "string read"]));
+            recorder().get().info(audit::eventw(&["error", "true", "module", "web", "class", "string read"]));
             return (StatusCode::BadRequest, "unable to read string".to_string());
         }
     }
@@ -105,48 +139,61 @@ where T: DeserializeOwned,
     let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
-            let conn = db::connect_to_db(&auditor);
+            let conn = db::connect_to_db(&recorder().get());
             match insert_function(&conn, &deserialized) {
                 Ok(_) => {
                     (StatusCode::Ok, "ok".to_string())
                 }
-                Err(_) => {
-                    auditor.info(audit::eventw(&["error", "true","module", "web",  "class", "db insert"]));
+                Err(err) => {
+                    recorder().get().debug(audit::eventw(&["error", "true", "module", "web", "class", "db insert", "details", &err.to_string()]));
+                    recorder().get().info(audit::eventw(&["error", "true","module", "web",  "class", "db insert"]));
                     (StatusCode::BadGateway, "server error".to_string())
                 }
             }
         }
 
         Err(_) => {
-            auditor.info(audit::eventw(&["error", "true", "module", "web",  "class", "deserialize/parse"]));
+            recorder().get().info(audit::eventw(&["error", "true", "module", "web",  "class", "deserialize/parse"]));
             (StatusCode::BadRequest, "bad parse and cast".to_string())
         }
     }
 }
 
-fn writemeasure(conn: &postgres::Connection, l: &MeasureIngest) ->
+fn writemeasure(conn: &postgres::Connection, tid: i32, l: &MeasureIngest) ->
     Result<u64, postgres::Error> {
-    conn.execute("INSERT INTO monitoring.measure (name, measurement, dict) VALUES ($1, $2, $3)",
-                 &[&l.name, &l.measurement, &l.dict])
+        conn.execute("INSERT INTO monitoring.measure (name, tenant_id, measurement, dict) VALUES ($1, $2, $3, $4)",
+                     &[&l.name, &tid, &l.measurement, &l.dict])
 
+    }
+
+fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
+
+    match get_tid(req) {
+
+        Some(tid) => {
+            let f = |conn: &postgres::Connection, l: &MeasureIngest| ->
+                Result<u64, postgres::Error> {
+                    writemeasure(conn, tid, l)
+                };
+
+            generic_post(req, f)
+        }
+        None => {
+            recorder().get().info(
+                audit::eventw(&["error", "true", "module", "web", "what", "failed to get the x tenant id from the middleware"]));
+            (StatusCode::BadRequest, "\"key failure\"".to_string())
+        }
+    }
 }
-fn postmeasure(req: &mut Request, auditor: &audit::Audit) ->
-    (nickel::status::StatusCode, String) {
 
-        let f = |conn: &postgres::Connection, l: &MeasureIngest| ->
-            Result<u64, postgres::Error> {
-        writemeasure(conn, l)
-    };
-
-    generic_post(req, auditor, f)
-}
 
 // TODO: dry up.
-fn getmeasure(_req: &mut Request, auditor: &audit::Audit) ->
-    (nickel::status::StatusCode, String) {
-    let conn = db::connect_to_db(&auditor);
-    let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure order by insertion_time desc limit 100";
-    match conn.query(query, &[]) {
+fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
+    let conn = db::connect_to_db(&recorder().get());
+    let tid = get_tid(req).unwrap();
+
+    let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure where tenant_id = $1 order by insertion_time desc limit 100";
+    match conn.query(query, &[&tid]) {
         Ok(rows) => {
             let mut vec: Vec<Measure> = Vec::new();
             for row in &rows {
@@ -163,34 +210,43 @@ fn getmeasure(_req: &mut Request, auditor: &audit::Audit) ->
             (StatusCode::Ok, result)
         }
         Err(e) => {
-            auditor.crisis(audit::eventw(&["error", "true", "module", "db", "error", format!("{:?}", e).as_str(), "query", &query]));
+            recorder().get().crisis(audit::eventw(&["error", "true", "module", "db", "error", format!("{:?}", e).as_str(), "query", &query]));
             (StatusCode::InternalServerError, "server error, can't get data".to_string())
         }
     }
 }
 
-fn writeevent(conn: &postgres::Connection, l: &EventIngest) ->
+fn writeevent(conn: &postgres::Connection, tid: i32, l: &EventIngest) ->
     Result<u64, postgres::Error> {
-    conn.execute("INSERT INTO monitoring.event (name, dict) VALUES ($1, $2)",
-                 &[&l.name, &l.dict])
+    conn.execute("INSERT INTO monitoring.event (name, tenant_id, dict) VALUES ($1, $2, $3)",
+                 &[&l.name, &tid, &l.dict])
 }
 
-fn postevent(req: &mut Request, auditor: &audit::Audit) ->
-    (nickel::status::StatusCode, String) {
+fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
 
-    let f = |conn: &postgres::Connection, l: &EventIngest| -> Result<u64, postgres::Error> {
-        writeevent(conn, l)
-    };
+    match get_tid(req) {
+        Some(tid) => {
+            let f = |conn: &postgres::Connection, l: &EventIngest| -> Result<u64, postgres::Error> {
+                writeevent(conn, tid, l)
+            };
 
-    generic_post(req, auditor, f)
+            generic_post(req, f)
+        }
+        None => {
+            recorder().get().info(
+                audit::eventw(&["error", "true", "module", "web", "what", "failed to get the x tenant id from the middleware"]));
+            (StatusCode::BadRequest, "\"key failure\"".to_string())
+        }
+    }
 }
 
-fn getevent(_req: &mut Request, auditor: &audit::Audit) ->
-    (nickel::status::StatusCode, String) {
-    let conn = db::connect_to_db(&auditor);
+fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
+    let conn = db::connect_to_db(&recorder().get());
     let mut vec: Vec<Event> = Vec::new();
+    let tid = get_tid(req).unwrap();
 
-    for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event order by insertion_time desc limit 100", &[]).unwrap() {
+    for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event where tenant_id = $1 order by insertion_time desc limit 100",
+                           &[&tid]).unwrap() {
         vec.push(Event {
             insertion_time: row.get(0),
             d: EventIngest {
@@ -204,24 +260,56 @@ fn getevent(_req: &mut Request, auditor: &audit::Audit) ->
     (StatusCode::Ok, result)
 }
 
+// index /
 fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
     (StatusCode::Ok, "welcome to nickel'd pmetrics".to_string())
 }
 
-struct ApiKeys;
-impl ApiKeys {
-    fn check_keys(&self, k: &str) -> bool {
-        k == "s3cret"
+//////////////////////////////
+// API KEY / tenant middleware.
+
+fn get_tid(req: &Request) -> Option<i32> {
+    match req.origin.headers.get_raw("X-TENANT-ID") {
+        Some(s) => {
+            let thread_string  = (&s[0]).to_vec();
+            let tid: i32 = String::from_utf8(thread_string).unwrap().parse().unwrap();
+            return Some(tid)
+
+        }
+        None => {
+            recorder().get().info(
+                audit::eventw(&["error", "true", "module", "web", "what", "failed to get the x tenant id from the middleware"]));
+            None
+        }
     }
 }
 
+struct ApiKeys;
+impl ApiKeys {
+    fn check_keys(&self, k: &str) -> Option<i32> {
+        // reads monitoring.apikeys
+        let conn = db::connect_to_db(&recorder().get());
+        let mut vec: Vec<i32> = Vec::new();
+
+        for row in &conn
+            .query("SELECT uid from monitoring.tenant where apikey = $1", &[&k.to_string()]).unwrap() {
+                vec.push(row.get(0));
+            }
+
+        if vec.len() > 0 {
+            return Some(vec[0]);
+        } else {
+            return None
+        }
+    }
+}
 
 fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
 
     let path = _req.path_without_query().unwrap();
+    // Cutout for non-api routes.
     if ! path.contains("api") {
         return res.next_middleware();
-
     }
 
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
@@ -229,7 +317,19 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
             let gatekeeper = ApiKeys{};
             let header = &s[0];
             let key: String = String::from_utf8(header.to_vec()).unwrap();
-            gatekeeper.check_keys(&key);
+            let apikeys = gatekeeper.check_keys(&key);
+            match apikeys {
+                Some(v) => {
+                    // Set it for other users lower down in the middleware stack.
+                    _req.origin.headers.set_raw("X-TENANT-ID", vec![v.to_string().into_bytes()]);
+                }
+                None => {
+                    res.set(StatusCode::Forbidden);
+
+                    return res.send("\"api key failure\"");
+                }
+            }
+
         }
         None =>  {
             res.set(StatusCode::Forbidden);
@@ -243,9 +343,12 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
 }
 
 fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
-    let auditor  = audit::Audit::new(*cl);
+
+    //    *Arc::get_mut(&mut recorder).unwrap() = &audit::Audit::new(*cl);
+    *recorder().inner.lock().unwrap() = audit::Audit{level: *cl, t: audit::AuditTarget::Stderr()};
 
     let mut server = Nickel::new();
+
     server.utilize(check_api_keys);
 
     server.get("/", middleware! { |req|
@@ -253,22 +356,22 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     });
 
     server.post("/api/v1/event", middleware! { |req|
-        postevent(req, &auditor)
+        postevent(req)
     });
     server.get("/api/v1/event", middleware! { |req|
-        getevent(req, &auditor)
+        getevent(req)
     });
 
     server.post("/api/v1/measure",  middleware! { |req|
-        postmeasure(req, &auditor)
+        postmeasure(req)
     });
 
     server.get("/api/v1/measure", middleware! { |req|
-        getmeasure(req, &auditor)
+        getmeasure(req)
     });
 
 
-    auditor.info(audit::event("server starting", &format!("{}", server_options.port)));
+    recorder().get().info(audit::event("server starting", &format!("{}", server_options.port)));
 
     server
         .listen(format!("0.0.0.0:{}", server_options.port))
@@ -326,7 +429,7 @@ enum PipeReader {
 }
 
 
-fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
+fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
     let auditor  = audit::Audit::new(*cl);
     let conn = db::connect_to_db(&auditor);
 
@@ -336,6 +439,15 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
         _ => {
             auditor.info(audit::event("opening", &filename));
             Box::new(File::open(filename).unwrap())
+        }
+    };
+
+    let gatekeeper = ApiKeys{};
+    let tid = match gatekeeper.check_keys(&apikey) {
+        Some(i) => i,
+        None => {
+            auditor.info(audit::event("api key failure", &apikey));
+            panic!("api key didn't work");
         }
     };
 
@@ -357,10 +469,10 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        writemeasure(&conn,measure).unwrap();
+                                        writemeasure(&conn,tid, measure).unwrap();
                                     }
                                     PipeReader::E(event) => {
-                                        writeevent(&conn, event).unwrap();
+                                        writeevent(&conn, tid, event).unwrap();
                                     }
                                 }
                                 auditor.info(audit::event("status", "written"));
@@ -392,7 +504,9 @@ enum ServerType {
 }
 
 struct CliOptions {
-    filename: String
+    filename: String,
+    apikey: String
+
 }
 
 struct ServerOptions {
@@ -453,7 +567,12 @@ fn clapparser() -> Command {
                          .short("f")
                          .long("file")
                          .takes_value(true)
-                         .help("file: can be ordinary or a named pipe. STDIN is used when not specified")))
+                         .help("file: can be ordinary or a named pipe. STDIN is used when not specified"))
+                    .arg(Arg::with_name("apikey")
+                         .short("k")
+                         .long("apikey")
+                         .takes_value(true)
+                         .help("api key - must be exist within the postgres db")))
         .subcommand(SubCommand::with_name("q")
                     .about("querier: pre-alpha edition. Probably will change drastically")
                     // CONSIDER what it would take to have a DSL here.
@@ -506,7 +625,12 @@ fn clapparser() -> Command {
     {
         if let Some(matches) = matches.subcommand_matches("piper") {
             let filename = matches.value_of("file").unwrap();
-            return Command::PipeReader(go, CliOptions { filename: filename.to_string() })
+            let apikey = match matches.value_of("apikey") {
+                Some(k) => k,
+                _ => panic!("Give me an api key")
+            };
+            return Command::PipeReader(go, CliOptions { filename: filename.to_string(),
+                                                        apikey: apikey.to_string() })
         }
 
     }
@@ -549,13 +673,13 @@ fn main() {
     };
 
     match cmd {
-        Command::Server(_, server_options, servertype) => {
+         Command::Server(_, server_options, servertype) => {
             match servertype {
                 ServerType::Http => launch_server(&cl, &server_options),
             }
         }
         Command::PipeReader(_, clioptions) => {
-            launch_writer(&cl, clioptions.filename)
+            launch_writer(&cl, clioptions.filename, clioptions.apikey)
         }
         Command::Querier(_, qo) => {
             launch_query(&cl, &qo)

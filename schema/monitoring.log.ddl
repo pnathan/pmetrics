@@ -4,6 +4,7 @@ CREATE SCHEMA monitoring;
 -- e.g., prometheus.
 CREATE TABLE  monitoring.measure(
 id serial,
+tenant_id int not null references monitoring.tenant(uid),
 insertion_time timestamp with time zone not null default now(),
 name text not null,
 measurement float not null,
@@ -12,6 +13,15 @@ dict jsonb not null);
 
 CREATE TABLE  monitoring.event(
 id serial,
+tenant_id int not null references monitoring.tenant(uid),
 insertion_time timestamp with time zone not null default now(),
 name text not null,
 dict jsonb not null);
+
+
+CREATE TABLE monitoring.tenant(
+uid serial primary key,
+tenantname text not null,
+apikey text not null);
+
+-- todo: add unique constraints on both tenantname and apikey.
