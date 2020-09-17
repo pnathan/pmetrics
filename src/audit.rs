@@ -10,16 +10,17 @@ extern crate either;
 extern crate itertools;
 
 use std::io::prelude::*;
+//use std::fmt::Write;
+
 use chrono::prelude::{DateTime, Utc};
 use audit::itertools::Itertools;
-use audit::either::{Either, Right, Left};
 
 #[derive(PartialEq, Debug)]
 pub struct Event {
     time: DateTime<Utc>,
     // Left: KV - Right - Vec of KVs
     // TODO: collapse this. Left should be a vec of length 1.
-    data: Either<(String, String), Vec<(String, String)>>
+    data:  Vec<(String, String)>
 }
 
 impl Event {
@@ -27,7 +28,7 @@ impl Event {
     pub fn new(k: &str, v: &str) -> Event {
         Event {
             time: Utc::now(),
-            data: Left((k.to_string(),v.to_string()))
+            data: vec![(k.to_string(), v.to_string())]
         }
     }
     // new event with multiple kv pairs.
@@ -42,8 +43,17 @@ impl Event {
 
         Event {
             time: Utc::now(),
-            data: Right(kvs)
+            data: kvs
         }
+    }
+
+    pub fn pretty(&self) -> String {
+        let mut res = String::new();
+        for pair in &self.data {
+
+            res.push_str(&format!("({}, {}) ", pair.0, pair.1));
+        }
+        return res
     }
 }
 
@@ -126,7 +136,7 @@ impl Audit {
 
 
                 let mut stderr = std::io::stderr();
-                match writeln!(&mut stderr, "{}: {}: {:?}", e.time, level, e.data) {
+                match writeln!(&mut stderr, "{}: {}: {}", e.time, level, e.pretty()) {
                     Err(e) => panic!("writing to stderr failed, invariant failed, crashing: {}", e),
                     Ok(_) => ()
                 }
@@ -147,7 +157,7 @@ mod tests {
         let gotten = event("a", "b");
         let expected = Event {
             time: gotten.time,
-            data: Left(("a".to_string(), "b".to_string()))
+            data: vec![("a".to_string(), "b".to_string())]
         };
         assert_eq!(expected, gotten);
     }
@@ -158,7 +168,7 @@ mod tests {
         let gotten = eventw(&["a", "b", "c", "d"]);
         let expected = Event {
             time: gotten.time,
-            data: Right([("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())].to_vec())
+            data: vec![("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())]
         };
         assert_eq!(expected, gotten);
     }
