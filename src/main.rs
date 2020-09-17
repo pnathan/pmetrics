@@ -341,6 +341,32 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
     // Pass control to the next middleware
     res.next_middleware()
 }
+fn info(pairs: &[&str]) -> () {
+    recorder().get().info(audit::eventw(pairs));
+}
+fn log_request<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
+
+    match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
+        Some(key) => {
+            let header = &key[0];
+            let key: String = String::from_utf8(header.to_vec()).unwrap();
+            info(&["module", "web",
+                   "method", &_req.origin.method.to_string(),
+                   "url", _req.path_without_query().unwrap(),
+                   "code", &res.status().to_string(),
+                   "apikey", &key]);
+        }
+        None => {
+            info(&["module", "web",
+                   "method", &_req.origin.method.to_string(),
+                   "url", _req.path_without_query().unwrap(),
+                   "code", &res.status().to_string()
+
+            ])
+        }
+    }
+    res.next_middleware()
+}
 
 fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
 
@@ -350,6 +376,7 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     let mut server = Nickel::new();
 
     server.utilize(check_api_keys);
+    server.utilize(log_request);
 
     server.get("/", middleware! { |req|
                                   handler(req)
@@ -369,6 +396,8 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     server.get("/api/v1/measure", middleware! { |req|
         getmeasure(req)
     });
+
+        server.utilize(log_request);
 
 
     recorder().get().info(audit::event("server starting", &format!("{}", server_options.port)));
