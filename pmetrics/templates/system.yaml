@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pmetrics
+  labels:
+    app: pmetrics
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: pmetrics
+  strategy:
+    maxSurge: "100%"
+    # 20% available to take traffic
+    maxUnavailable: "80%"
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: pmetrics
+        version: v5
+    spec:
+      containers:
+        - name: pmetrics
+          image: "{{ .Values.image }}"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 1337
+          livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /
+                port: 1337
+              initialDelaySeconds: 10
+              timeoutSeconds: 10
+
+          readinessProbe:
+              httpGet:
+                path: /
+                port: 1337
+              initialDelaySeconds: 10
+              timeoutSeconds: 10
+          env:
+            - name: PGUSER
+              value: {{ .Values.pguser }}
+            - name: PGHOST
+              value: {{ .Values.pghost }}
+            - name: PGPORT
+              value: "{{ .Values.pgport }}"
+            - name: PGDATABASE
+              value: {{ .Values.pgdatabase }}
+            - name: PGPASSWORD
+              value: {{ .Values.pgpassword }}
+##############################
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pmetrics
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 1337
+      name: http
+  selector:
+    app: pmetrics
+
+##############################
+---
+# apiVersion: networking.k8s.io/v1
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: pmetrics
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+  - http:
+      paths:
+      - path: {{ .Values.ingressPath }}
+        backend:
+          serviceName: pmetrics
+          servicePort: 80
