@@ -10,16 +10,32 @@ spec:
     matchLabels:
       app: pmetrics
   strategy:
-    maxSurge: "100%"
-    # 20% available to take traffic
-    maxUnavailable: "80%"
+    rollingUpdate:
+      maxSurge: "100%"
+      # 20% available to take traffic
+      maxUnavailable: "50%"
     type: RollingUpdate
   template:
     metadata:
       labels:
         app: pmetrics
-        version: v5
+        version: v18
     spec:
+      # requests should be done in < 1s
+      terminationGracePeriodSeconds: 5
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: "app"
+                      operator: In
+                      values:
+                        - pmetrics
+                topologyKey: "kubernetes.io/hostname"
       containers:
         - name: pmetrics
           image: "{{ .Values.image }}"
@@ -27,20 +43,36 @@ spec:
           ports:
             - name: http
               containerPort: 1337
-          livenessProbe:
-              failureThreshold: 3
-              httpGet:
-                path: /
-                port: 1337
-              initialDelaySeconds: 10
-              timeoutSeconds: 10
 
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: liveness-port
+            failureThreshold: 30
+            periodSeconds: 10
+
+
+
+          # # am I alive?
+          # livenessProbe:
+          #     httpGet:
+          #       path: /healthz
+          #       port: 1337
+          #     failureThreshold: 1
+          #     initialDelaySeconds: 3
+          #     timeoutSeconds: 10
+          #     periodSeconds: 15
+
+          # can I take traffic?
           readinessProbe:
               httpGet:
-                path: /
+                path: /healthz
                 port: 1337
-              initialDelaySeconds: 10
-              timeoutSeconds: 10
+              initialDelaySeconds: 3
+              failureThreshold: 3
+              timeoutSeconds: 30
+              periodSeconds: 60
+
           env:
             - name: PGUSER
               value: {{ .Values.pguser }}
@@ -52,6 +84,13 @@ spec:
               value: {{ .Values.pgdatabase }}
             - name: PGPASSWORD
               value: {{ .Values.pgpassword }}
+          resources:
+            requests:
+              memory: "10Mi"
+              cpu: "10m"
+            limits:
+              memory: "500Mi"
+              cpu: "1000m"
 ##############################
 ---
 apiVersion: v1

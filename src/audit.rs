@@ -51,7 +51,7 @@ impl Event {
         let mut res = String::new();
         for pair in &self.data {
 
-            res.push_str(&format!("({}, {}) ", pair.0, pair.1));
+            res.push_str(&format!("{}={}  ", pair.0, pair.1));
         }
         return res
     }

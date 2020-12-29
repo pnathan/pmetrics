@@ -5,7 +5,13 @@ authors = ["Paul Nathan <paul@nathan.house>"]
 
 [features]
 default = ["postgres/with-serde_json", "postgres/with-chrono"]
+
+[profile.release]
+debug=true
+
 [dependencies]
+pretty_trace = {git = "https://github.com/10XGenomics/rust-toolbox.git"}
+nix = "0.19.1"
 
 clap = "2.33"
 either = "^1"

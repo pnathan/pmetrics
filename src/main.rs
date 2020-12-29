@@ -10,6 +10,7 @@ extern crate serde;
 extern crate serde_json;
 extern crate postgres;
 extern crate clap;
+extern crate pretty_trace;
 
 
 use std::io;
@@ -21,6 +22,7 @@ use chrono::prelude::{DateTime, Utc};
 use clap::{Arg, App, SubCommand};
 use nickel::status::StatusCode;
 use nickel::{Nickel,/* QueryString, */HttpRouter, Request, Response, MiddlewareResult};
+use pretty_trace::*;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned; // this is /not obvious/.
 use serde_json::Value;
@@ -265,6 +267,13 @@ fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
     (StatusCode::Ok, "welcome to nickel'd pmetrics".to_string())
 }
 
+// healthz - am I alive?
+// does not check database liveness though.
+fn healthz(_req: &mut Request) -> (nickel::status::StatusCode, String) {
+    recorder().get().info(audit::event("healthz", "true"));
+    (StatusCode::Ok, "ok".to_string())
+}
+
 //////////////////////////////
 // API KEY / tenant middleware.
 
@@ -353,14 +362,14 @@ fn log_request<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareRes
             info(&["module", "web",
                    "method", &_req.origin.method.to_string(),
                    "url", _req.path_without_query().unwrap(),
-                   "code", &res.status().to_string(),
+//                   "code", &res.status().to_string(),
                    "apikey", &key]);
         }
         None => {
             info(&["module", "web",
                    "method", &_req.origin.method.to_string(),
                    "url", _req.path_without_query().unwrap(),
-                   "code", &res.status().to_string()
+//                   "code", &res.status().to_string()
 
             ])
         }
@@ -373,14 +382,21 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     //    *Arc::get_mut(&mut recorder).unwrap() = &audit::Audit::new(*cl);
     *recorder().inner.lock().unwrap() = audit::Audit{level: *cl, t: audit::AuditTarget::Stderr()};
 
+    recorder().get().info(audit::event("message", "server initializing"));
+
     let mut server = Nickel::new();
 
+    server.get("/healthz", middleware! { |req|
+                                          healthz(req)
+    });
+
     server.utilize(check_api_keys);
-    server.utilize(log_request);
 
     server.get("/", middleware! { |req|
                                   handler(req)
     });
+
+    server.utilize(log_request);
 
     server.post("/api/v1/event", middleware! { |req|
         postevent(req)
@@ -396,8 +412,6 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
     server.get("/api/v1/measure", middleware! { |req|
         getmeasure(req)
     });
-
-        server.utilize(log_request);
 
 
     recorder().get().info(audit::event("server starting", &format!("{}", server_options.port)));
@@ -693,6 +707,8 @@ fn clapparser() -> Command {
 }
 
 fn main() {
+    PrettyTrace::new().on();
+
     let cmd = clapparser();
 
     let cl = match cmd {
