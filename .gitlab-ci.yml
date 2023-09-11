@@ -1,8 +1,20 @@
 image: rust:latest
 stages:
   - build
+  - publish
 run-build:
   stage: build
   image: rust:latest
   script:
-    - "cargo build"
+    - cargo build
+release:
+  stage: publish
+  image: rust:latest
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/pmetrics
+  only:
+    - master
+
