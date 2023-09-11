@@ -19,7 +19,7 @@ use std::fs::File;
 use std::{thread, time};
 
 use chrono::prelude::{DateTime, Utc};
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App, SubCommand, Parser};
 use nickel::status::StatusCode;
 use nickel::{Nickel,/* QueryString, */HttpRouter, Request, Response, MiddlewareResult};
 use pretty_trace::*;
@@ -212,7 +212,7 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             (StatusCode::Ok, result)
         }
         Err(e) => {
-            recorder().get().crisis(audit::eventw(&["error", "true", "module", "db", "error", format!("{:?}", e).as_str(), "query", &query]));
+            recorder().get().crisis(audit::eventw(&["error", "true", "module", "db", "error",  e.to_string(), "query", &query]));
             (StatusCode::InternalServerError, "server error, can't get data".to_string())
         }
     }
@@ -306,7 +306,7 @@ impl ApiKeys {
             }
 
         if vec.len() > 0 {
-            return Some(vec[0]);
+            return Some(vec[0].clone());
         } else {
             return None
         }
@@ -486,7 +486,7 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
     };
 
     let gatekeeper = ApiKeys{};
-    let tid = match gatekeeper.check_keys(&apikey) {
+    let tid: i32 = match gatekeeper.check_keys(&apikey) {
         Some(i) => i,
         None => {
             auditor.info(audit::event("api key failure", &apikey));
@@ -512,10 +512,10 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        writemeasure(&conn,tid, measure).unwrap();
+                                        writemeasure(&conn,tid.clone(), measure).unwrap();
                                     }
                                     PipeReader::E(event) => {
-                                        writeevent(&conn, tid, event).unwrap();
+                                        writeevent(&conn, tid.clone(), event).unwrap();
                                     }
                                 }
                                 auditor.info(audit::event("status", "written"));
@@ -580,10 +580,28 @@ struct QueryOptions {
     format: OutputFormat
 }
 
+#[derive(Subcommand, Debug)]
 enum Command {
+    #[command(subcommand)]
     PipeReader(GlobalOptions, CliOptions),
+    #[command(subcommand)]
     Server(GlobalOptions, ServerOptions, ServerType),
+    #[command(subcommand)]
     Querier(GlobalOptions, QueryOptions)
+}
+
+
+#[derive(Debug, Parser)]
+#[command(name = "pmetrics")]
+#[command(version = "1.0.1")]
+#[command(about = "an observability system", long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    #[options(help = "verbosity - repeating it 1 or 2 times is possible ")]
+    v: u8,
+
+    #[command(subcommand)]
+    cmd: Command
 }
 
 fn clapparser() -> Command {
