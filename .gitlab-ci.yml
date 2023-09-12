@@ -1,14 +1,13 @@
 image: rust:latest
 stages:
   - build
-  - publish
 run-build:
   stage: build
   image: rust:latest
   script:
     - cargo build
 release:
-  stage: publish
+  stage: build
   image: rust:latest
   script:
     - cargo build --release
