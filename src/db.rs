@@ -1,9 +1,9 @@
 extern crate postgres;
 use std::env;
-use postgres::{Connection, TlsMode};
+use postgres::{Client, NoTls};
 use std::collections::HashMap;
 
-use audit;
+use crate::audit;
 
 struct PostgresClientArgs {
     user: String,
@@ -53,9 +53,9 @@ impl PostgresClientArgs {
 }
 
 
-pub fn connect_to_db(auditor: &audit::Audit) -> postgres::Connection {
+pub fn connect_to_db(auditor: &audit::Audit) -> postgres::Client {
     let cs = PostgresClientArgs::from_env().connection_string();
-    let conn = Connection::connect(cs, TlsMode::None).unwrap();
+    let conn = Client::connect(cs.as_str(), NoTls).unwrap();
     auditor.tell(&audit::Concern::Info(audit::Event::new("started", "pg conn")));
 
     conn
