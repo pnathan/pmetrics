@@ -16,5 +16,4 @@ release:
     paths:
       - target/release/pmetrics
   only:
-    - master
-
+    - main
