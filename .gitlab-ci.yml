@@ -5,12 +5,12 @@ run-build:
   stage: build
   image: rust:latest
   script:
-    - cargo build
+    - cargo build --offline
 release:
   stage: build
   image: rust:latest
   script:
-    - cargo build --release
+    - cargo build --release --offline
     - strip target/release/pmetrics
   artifacts:
     paths:
