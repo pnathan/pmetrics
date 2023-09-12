@@ -1,26 +1,25 @@
 [package]
+edition = "2021"
 name = "pmetrics"
-version = "0.1.0"
+version = "1.0.1"
 authors = ["Paul Nathan <paul@nathan.house>"]
 
 [features]
-default = ["postgres/with-serde_json", "postgres/with-chrono"]
 
 [profile.release]
 debug=true
 
 [dependencies]
-pretty_trace = {git = "https://github.com/10XGenomics/rust-toolbox.git"}
-nix = "0.19.1"
+nix = "0.27.1"
 
-clap = "2.33"
+clap = { version = "4.3.10", features = ["derive"] }
 either = "^1"
-itertools = "^0.8"
+itertools = "0.11.0"
 nickel = "^0.11"
 
 serde = { version = "^1.0", features = ["derive"] }
 # https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html
-postgres = "^0.15"
-time = "^0.1"
+postgres = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
+time = "0.3.28"
 chrono = { version = "^0.4", features = ["serde"] }
 serde_json = "^1.0"

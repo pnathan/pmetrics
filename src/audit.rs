@@ -13,7 +13,7 @@ use std::io::prelude::*;
 //use std::fmt::Write;
 
 use chrono::prelude::{DateTime, Utc};
-use audit::itertools::Itertools;
+use itertools::Itertools;
 
 #[derive(PartialEq, Debug)]
 pub struct Event {
@@ -66,7 +66,7 @@ pub fn eventw(kvs:  &[&str]) -> Event {
     Event::newvec(kvs)
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ConcernLevel {
     Debug,
     Info,
