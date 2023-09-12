@@ -12,6 +12,7 @@ release:
   image: rust:latest
   script:
     - cargo build --release
+    - strip target/release/pmetrics
   artifacts:
     paths:
       - target/release/pmetrics
