@@ -17,21 +17,19 @@ WORKDIR /wd
 # copy . /wd/
 RUN mkdir -p /wd/pmetrics
 
-copy src/ /wd/src
-copy Cargo.toml /wd/Cargo.toml
-copy Cargo.lock /wd/Cargo.lock
-copy .cargo /wd/.cargo
-run find /wd/
-copy vendor/ /wd/vendor
+COPY src/ /wd/src
+COPY Cargo.toml /wd/Cargo.toml
+COPY Cargo.lock /wd/Cargo.lock
+COPY .cargo /wd/.cargo
+RUN find /wd/
+COPY vendor/ /wd/vendor
 
-
-# RUN cargo build --bins --release --offline
-RUN cargo build --bins --offline
+RUN cargo build --bins --release --offline
 
 FROM scratch
 ARG version=unknown
 ARG release=unreleased
-EXPOSE 8080
+EXPOSE 1337
 LABEL version=${version} \
       release=${release}
 
