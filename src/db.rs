@@ -50,7 +50,7 @@ impl PgConn for PostgresSocketClientArgs {
     }
 
     fn connection_string(&self) -> String {
-        format!("user={} password={} database={} host={}", self.user, self.password, self.db, self.socket)
+        format!("user={} password={} dbname={} host={}", self.user, self.password, self.db, self.socket)
     }
 }
 
