@@ -19,3 +19,5 @@ steps:
       - 'us-central1'
 images:
   - 'gcr.io/$PROJECT_ID/pmetrics:$COMMIT_SHA'
+options:
+  logging: CLOUD_LOGGING_ONLY
