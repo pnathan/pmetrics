@@ -7,7 +7,7 @@ steps:
     args:
       - --destination=gcr.io/$PROJECT_ID/pmetrics
       - --cache=true
-      - --cache-ttl=XXh
+      - --cache-ttl=36h
   # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/pmetrics:$COMMIT_SHA']
