@@ -34,5 +34,5 @@ LABEL version=${version} \
       release=${release}
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /wd/target/debug/pmetrics /opt/pmetrics
+COPY --from=builder /wd/target/release/pmetrics /opt/pmetrics
 ENTRYPOINT ["/opt/pmetrics", "server", "--server-type", "http", "--port", "1337"]
