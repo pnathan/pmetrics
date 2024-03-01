@@ -10,7 +10,7 @@ authors = ["Paul Nathan <paul@nathan.house>"]
 debug=true
 
 [dependencies]
-nix = "0.27.1"
+# nix = "0.27.1"
 
 clap = { version = "4.3.10", features = ["derive"] }
 either = "^1"
