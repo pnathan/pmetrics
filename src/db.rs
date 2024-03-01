@@ -120,7 +120,6 @@ fn get_connection_string() -> String {
 
 pub fn connect_to_db(auditor: &audit::Audit) -> postgres::Client {
     let cs = get_connection_string();
-    println!("connecting to {}", cs);
     let conn = Client::connect(cs.as_str(), NoTls).unwrap();
     auditor.tell(&audit::Concern::Info(audit::Event::new("started", "pg conn")));
 
