@@ -1,6 +1,7 @@
 image: rust:latest
 stages:
   - build
+  - cleanup
 run-build:
   stage: build
   image: rust:latest
