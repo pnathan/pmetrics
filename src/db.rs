@@ -1,7 +1,10 @@
 extern crate postgres;
 use std::env;
+use percent_encoding_rfc3986::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use postgres::{Client, NoTls};
 use std::collections::HashMap;
+
+
 
 use crate::audit;
 
@@ -104,7 +107,10 @@ impl PgConn for PostgresClientArgs {
     }
 
     fn connection_string(&self) -> String {
-        format!("postgres://{}:{}@{}:{}/{}", self.user, self.password, self.host, self.port, self.db)
+        let pw = utf8_percent_encode(&self.password, NON_ALPHANUMERIC).to_string();
+        let user = utf8_percent_encode(&self.user, NON_ALPHANUMERIC).to_string();
+
+        format!("postgres://{}:{}@{}:{}/{}", user, pw, self.host, self.port, self.db)
     }
 }
 
