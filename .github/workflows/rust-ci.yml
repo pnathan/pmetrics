@@ -1,0 +1,93 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:11
+        env:
+          POSTGRES_PASSWORD: aargh
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+    
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Check formatting
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: --all -- --check
+    
+    - name: Lint with Clippy
+      uses: actions-rs/cargo@v1
+      with:
+        command: clippy
+        args: -- -D warnings
+    
+    - name: Build
+      uses: actions-rs/cargo@v1
+      with:
+        command: build
+        args: --verbose
+    
+    - name: Initialize database
+      run: |
+        export PGPASSWORD=aargh
+        export PGHOST=localhost
+        export PGUSER=postgres
+        export PGDATABASE=postgres
+        export PGPORT=5432
+        psql -1 -f schema/monitoring.log.ddl
+        psql -1 -c "INSERT INTO monitoring.tenant(tenantname, apikey) values ('test',  'a-wiWimWyilf')"
+        psql -1 -c "INSERT INTO monitoring.tenant(tenantname, apikey) values ('test',  'a-IbpyucIo')"
+    
+    - name: Run tests
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: --verbose
+      env:
+        PGPASSWORD: aargh
+        PGHOST: localhost
+        PGUSER: postgres
+        PGDATABASE: postgres
+        PGPORT: 5432
