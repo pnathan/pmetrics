@@ -44,7 +44,7 @@ where
 
     let mut indices = (0..num_hosts).collect::<Vec<_>>();
     if config.load_balance_hosts == LoadBalanceHosts::Random {
-        indices.shuffle(&mut rand::thread_rng());
+        indices.shuffle(&mut rand::rng());
     }
 
     let mut error = None;
@@ -101,7 +101,7 @@ where
                 .collect::<Vec<_>>();
 
             if config.load_balance_hosts == LoadBalanceHosts::Random {
-                addrs.shuffle(&mut rand::thread_rng());
+                addrs.shuffle(&mut rand::rng());
             }
 
             let mut last_err = None;
@@ -160,7 +160,7 @@ where
     let has_hostname = hostname.is_some();
     let (mut client, mut connection) = connect_raw(socket, tls, has_hostname, config).await?;
 
-    if let TargetSessionAttrs::ReadWrite = config.target_session_attrs {
+    if config.target_session_attrs != TargetSessionAttrs::Any {
         let rows = client.simple_query_raw("SHOW transaction_read_only");
         pin_mut!(rows);
 
@@ -185,10 +185,20 @@ where
 
             match next.await.transpose()? {
                 Some(SimpleQueryMessage::Row(row)) => {
-                    if row.try_get(0)? == Some("on") {
+                    let read_only_result = row.try_get(0)?;
+                    if read_only_result == Some("on")
+                        && config.target_session_attrs == TargetSessionAttrs::ReadWrite
+                    {
                         return Err(Error::connect(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             "database does not allow writes",
+                        )));
+                    } else if read_only_result == Some("off")
+                        && config.target_session_attrs == TargetSessionAttrs::ReadOnly
+                    {
+                        return Err(Error::connect(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "database is not read only",
                         )));
                     } else {
                         break;

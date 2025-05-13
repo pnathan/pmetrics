@@ -17,14 +17,14 @@ use bytes::BytesMut;
 mod bit_vec_06;
 #[cfg(feature = "with-chrono-0_4")]
 mod chrono_04;
-#[cfg(feature = "with-eui48-0_4")]
-mod eui48_04;
 #[cfg(feature = "with-eui48-1")]
 mod eui48_1;
 #[cfg(feature = "with-geo-types-0_6")]
 mod geo_types_06;
 #[cfg(feature = "with-geo-types-0_7")]
 mod geo_types_07;
+#[cfg(feature = "with-jiff-0_1")]
+mod jiff_01;
 #[cfg(feature = "with-serde_json-1")]
 mod serde_json_1;
 #[cfg(feature = "with-smol_str-01")]
@@ -509,7 +509,7 @@ async fn domain() {
         to_sql_checked!();
     }
 
-    impl<'a> FromSql<'a> for SessionId {
+    impl FromSql<'_> for SessionId {
         fn from_sql(ty: &Type, raw: &[u8]) -> result::Result<Self, Box<dyn Error + Sync + Send>> {
             Vec::<u8>::from_sql(ty, raw).map(SessionId)
         }

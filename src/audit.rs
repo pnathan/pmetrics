@@ -20,7 +20,7 @@ pub struct Event {
     time: DateTime<Utc>,
     // Left: KV - Right - Vec of KVs
     // TODO: collapse this. Left should be a vec of length 1.
-    data:  Vec<(String, String)>
+    data: Vec<(String, String)>,
 }
 
 impl Event {
@@ -28,7 +28,7 @@ impl Event {
     pub fn new(k: &str, v: &str) -> Event {
         Event {
             time: Utc::now(),
-            data: vec![(k.to_string(), v.to_string())]
+            data: vec![(k.to_string(), v.to_string())],
         }
     }
     // new event with multiple kv pairs.
@@ -43,26 +43,24 @@ impl Event {
 
         Event {
             time: Utc::now(),
-            data: kvs
+            data: kvs,
         }
     }
 
     pub fn pretty(&self) -> String {
         let mut res = String::new();
         for pair in &self.data {
-
             res.push_str(&format!("{}={}  ", pair.0, pair.1));
         }
-        return res
+        return res;
     }
 }
 
 pub fn event(k: &str, v: &str) -> Event {
-    Event::new(k,v)
+    Event::new(k, v)
 }
 
-
-pub fn eventw(kvs:  &[&str]) -> Event {
+pub fn eventw(kvs: &[&str]) -> Event {
     Event::newvec(kvs)
 }
 
@@ -70,29 +68,32 @@ pub fn eventw(kvs:  &[&str]) -> Event {
 pub enum ConcernLevel {
     Debug,
     Info,
-    Crisis
+    Crisis,
 }
 
 pub enum Concern {
     Debug(Event),
     Info(Event),
-    Crisis(Event)
+    Crisis(Event),
 }
 
 #[derive(Copy, Clone)]
 pub enum AuditTarget {
     Stderr(),
-    Noop()
+    Noop(),
 }
 #[derive(Copy, Clone)]
 pub struct Audit {
     pub level: ConcernLevel,
-    pub t: AuditTarget
+    pub t: AuditTarget,
 }
 
 impl Audit {
     pub fn new(c: ConcernLevel) -> Audit {
-        Audit { level: c, t: AuditTarget::Stderr() }
+        Audit {
+            level: c,
+            t: AuditTarget::Stderr(),
+        }
     }
 
     pub fn debug(&self, event: Event) {
@@ -105,48 +106,44 @@ impl Audit {
         self.tell(&Concern::Crisis(event));
     }
     pub fn tell(&self, c: &Concern) {
-
         match &self.t {
             AuditTarget::Stderr() => {
-
                 match &self.level {
                     // pass everything through
                     ConcernLevel::Debug => {}
 
                     // short-circuit on Debug
-                    ConcernLevel::Info =>  match c {
-                        Concern::Debug(_) => {
-                            return
-                        }
+                    ConcernLevel::Info => match c {
+                        Concern::Debug(_) => return,
                         _ => {}
-                    }
+                    },
 
-                    ConcernLevel::Crisis =>  match c {
+                    ConcernLevel::Crisis => match c {
                         // Only keep going on Crisis.
                         Concern::Crisis(_) => {}
-                        _ =>  return
-                    }
+                        _ => return,
+                    },
                 }
 
                 let (level, e) = match c {
                     Concern::Debug(e) => ("DEBUG", e),
                     Concern::Info(e) => ("INFO", e),
-                    Concern::Crisis(e) => ("CRISIS", e)
+                    Concern::Crisis(e) => ("CRISIS", e),
                 };
-
 
                 let mut stderr = std::io::stderr();
                 match writeln!(&mut stderr, "{}: {}: {}", e.time, level, e.pretty()) {
-                    Err(e) => panic!("writing to stderr failed, invariant failed, crashing: {}", e),
-                    Ok(_) => ()
+                    Err(e) => panic!(
+                        "writing to stderr failed, invariant failed, crashing: {}",
+                        e
+                    ),
+                    Ok(_) => (),
                 }
             }
             AuditTarget::Noop() => {}
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -157,18 +154,20 @@ mod tests {
         let gotten = event("a", "b");
         let expected = Event {
             time: gotten.time,
-            data: vec![("a".to_string(), "b".to_string())]
+            data: vec![("a".to_string(), "b".to_string())],
         };
         assert_eq!(expected, gotten);
     }
 
     #[test]
-    fn test_newevent_w()
-    {
+    fn test_newevent_w() {
         let gotten = eventw(&["a", "b", "c", "d"]);
         let expected = Event {
             time: gotten.time,
-            data: vec![("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())]
+            data: vec![
+                ("a".to_string(), "b".to_string()),
+                ("c".to_string(), "d".to_string()),
+            ],
         };
         assert_eq!(expected, gotten);
     }
@@ -177,7 +176,7 @@ mod tests {
     fn test_target() {
         let a = Audit {
             level: ConcernLevel::Crisis,
-            t: AuditTarget::Noop()
+            t: AuditTarget::Noop(),
         };
         a.tell(&Concern::Debug(event("a", "b")));
     }

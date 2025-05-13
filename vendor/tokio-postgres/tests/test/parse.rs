@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tokio_postgres::config::{Config, TargetSessionAttrs};
+use tokio_postgres::config::{Config, SslNegotiation, TargetSessionAttrs};
 
 fn check(s: &str, config: &Config) {
     assert_eq!(s.parse::<Config>().expect(s), *config, "`{}`", s);
@@ -33,6 +33,18 @@ fn settings() {
             .keepalives(false)
             .keepalives_idle(Duration::from_secs(30))
             .target_session_attrs(TargetSessionAttrs::ReadWrite),
+    );
+    check(
+        "connect_timeout=3 keepalives=0 keepalives_idle=30 target_session_attrs=read-only",
+        Config::new()
+            .connect_timeout(Duration::from_secs(3))
+            .keepalives(false)
+            .keepalives_idle(Duration::from_secs(30))
+            .target_session_attrs(TargetSessionAttrs::ReadOnly),
+    );
+    check(
+        "sslnegotiation=direct",
+        Config::new().ssl_negotiation(SslNegotiation::Direct),
     );
 }
 
