@@ -1,2 +1,5 @@
 *~
-target/*
+target/*bazel-*
+.idea/
+.bazel-*/
+target/

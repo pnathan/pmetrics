@@ -1,0 +1,8 @@
+pguser: user
+pghost: "host"
+pgport: "5432"
+pgdatabase: postgres
+# set this on the command line down the road
+pgpassword: "password"
+image: a-pmetrics:latest
+ingressPath: "/"
