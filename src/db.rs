@@ -121,7 +121,7 @@ impl PgConn for PostgresClientArgs {
 // hacky facade for different env var combos.
 fn get_connection_string() -> String {
     let envmap: HashMap<String, String> = env::vars().collect();
-    if envmap.get("INSTANCE_UNIX_SOCKET").is_some() {
+    if envmap.contains_key("INSTANCE_UNIX_SOCKET") {
         PostgresSocketClientArgs::from_env().connection_string()
     } else {
         PostgresClientArgs::from_env().connection_string()
