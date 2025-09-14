@@ -537,28 +537,15 @@ struct ServerOptions {
 }
 
 #[derive(Debug)]
-enum OutputFormat {
-    Json,
-    Table,
-}
-
-#[derive(Debug)]
 enum MetricTypeOption {
     M,
     E,
-}
-
-enum MetricType {
-    M(Measure),
-    E(Event),
 }
 
 #[derive(Debug)]
 struct QueryOptions {
     metric_type: MetricTypeOption,
     last: u16,
-    streaming: bool,
-    format: OutputFormat,
 }
 
 #[derive(Debug)]
@@ -585,8 +572,6 @@ enum PmetricsMode {
     Querier {
         metric_type: String,
         last: u16,
-        format: String,
-        stream: bool,
     },
 }
 
@@ -621,10 +606,7 @@ fn clapparser() -> (Command, u8) {
             apikey: api_key,
         }),
         PmetricsMode::Querier {
-            metric_type,
-            last,
-            format,
-            stream,
+            metric_type, last, ..
         } => {
             let mt = match metric_type.as_str() {
                 "m" => MetricTypeOption::M,
@@ -632,17 +614,9 @@ fn clapparser() -> (Command, u8) {
                 _ => panic!("not a valid metric type - try m or e"),
             };
 
-            let fmt = match format.as_str() {
-                "json" => OutputFormat::Json,
-                "table" => OutputFormat::Table,
-                _ => panic!("not a valid output format - try json or table"),
-            };
-
             let qo = QueryOptions {
                 metric_type: mt,
                 last: last,
-                streaming: stream,
-                format: fmt,
             };
             Command::Querier(qo)
         }

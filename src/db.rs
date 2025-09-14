@@ -1,5 +1,5 @@
 extern crate postgres;
-use percent_encoding_rfc3986::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding_rfc3986::{utf8_percent_encode, NON_ALPHANUMERIC};
 use postgres::{Client, NoTls};
 use std::collections::HashMap;
 use std::env;
