@@ -99,7 +99,7 @@ where
             match insert_function(&mut conn, &deserialized) {
                 Ok(_) => (StatusCode::Ok, "ok".to_string()),
                 Err(err) => {
-                    log::debug!("error=true module=web class=db_insert details={}", err);
+                    log::debug!("error=true module=web class=db_insert details={err}");
                     log::info!("error=true module=web class=db_insert");
                     (StatusCode::BadGateway, "server error".to_string())
                 }
@@ -483,23 +483,23 @@ fn launch_writer(filename: String, apikey: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        writemeasure(&mut conn, tid.clone(), measure).unwrap();
+                                        writemeasure(&mut conn, tid, measure).unwrap();
                                     }
                                     PipeReader::E(event) => {
-                                        writeevent(&mut conn, tid.clone(), event).unwrap();
+                                        writeevent(&mut conn, tid, event).unwrap();
                                     }
                                 }
                                 log::info!("status=written");
                             }
                         }
                         Err(e) => {
-                            log::error!("err={:?}", e);
+                            log::error!("err={e:?}");
                         }
                     }
                 }
             }
             Err(e) => {
-                log::info!("err={:?}", e);
+                log::info!("err={e:?}");
             }
         }
 
