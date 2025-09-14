@@ -22,7 +22,7 @@ struct PostgresSocketClientArgs {
 
 impl PgConn for PostgresSocketClientArgs {
     fn from_env() -> PostgresSocketClientArgs {
-        let envmap: HashMap<String, String> = env::vars().into_iter().collect();
+        let envmap: HashMap<String, String> = env::vars().collect();
 
         let pguser = match envmap.get("PGUSER") {
             Some(s) => s,
@@ -71,7 +71,7 @@ struct PostgresClientArgs {
 
 impl PgConn for PostgresClientArgs {
     fn from_env() -> PostgresClientArgs {
-        let envmap: HashMap<String, String> = env::vars().into_iter().collect();
+        let envmap: HashMap<String, String> = env::vars().collect();
 
         let pguser = match envmap.get("PGUSER") {
             Some(s) => s,
@@ -120,8 +120,8 @@ impl PgConn for PostgresClientArgs {
 
 // hacky facade for different env var combos.
 fn get_connection_string() -> String {
-    let envmap: HashMap<String, String> = env::vars().into_iter().collect();
-    if let Some(_) = envmap.get("INSTANCE_UNIX_SOCKET") {
+    let envmap: HashMap<String, String> = env::vars().collect();
+    if envmap.get("INSTANCE_UNIX_SOCKET").is_some() {
         PostgresSocketClientArgs::from_env().connection_string()
     } else {
         PostgresClientArgs::from_env().connection_string()
