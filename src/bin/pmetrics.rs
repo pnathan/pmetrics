@@ -139,7 +139,9 @@ fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
+            log::info!(
+                "error=true module=web what='failed to get the x tenant id from the middleware'"
+            );
             (StatusCode::BadRequest, "\"key failure\"".to_string())
         }
     }
@@ -202,7 +204,9 @@ fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
+            log::info!(
+                "error=true module=web what='failed to get the x tenant id from the middleware'"
+            );
             (StatusCode::BadRequest, "\"key failure\"".to_string())
         }
     }
@@ -251,7 +255,9 @@ fn get_tid(req: &Request) -> Option<i32> {
             return Some(tid);
         }
         None => {
-            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
+            log::info!(
+                "error=true module=web what='failed to get the x tenant id from the middleware'"
+            );
             None
         }
     }
@@ -659,9 +665,7 @@ fn main() {
         Command::Server(server_options, servertype) => match servertype {
             ServerType::Http => launch_server(&server_options),
         },
-        Command::PipeReader(clioptions) => {
-            launch_writer(clioptions.filename, clioptions.apikey)
-        }
+        Command::PipeReader(clioptions) => launch_writer(clioptions.filename, clioptions.apikey),
         Command::Querier(qo) => launch_query(&qo),
     }
 }
