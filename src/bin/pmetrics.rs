@@ -391,13 +391,7 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
 
 #[allow(clippy::result_large_err)]
 fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<'mw> {
-    let path = match _req.path_without_query() {
-        Some(p) => p,
-        None => {
-            // Still log the request, but with a placeholder for the path.
-            "<no path>"
-        }
-    };
+    let path = _req.path_without_query().unwrap_or("<no path>");
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
         Some(key) => {
             let header = &key[0];
