@@ -143,7 +143,15 @@ fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
 // TODO: dry up.
 fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
     let mut conn = db::connect_to_db();
-    let tid = get_tid(req).unwrap();
+    let tid = match get_tid(req) {
+        Some(tid) => tid,
+        None => {
+            return (
+                StatusCode::BadRequest,
+                "could not get tenant id".to_string(),
+            );
+        }
+    };
 
     let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure where tenant_id = $1 order by insertion_time desc limit 100";
     match conn.query(query, &[&tid]) {
@@ -159,8 +167,16 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
                     },
                 });
             }
-            let result = serde_json::to_string(&vec).unwrap();
-            (StatusCode::Ok, result)
+            match serde_json::to_string(&vec) {
+                Ok(s) => (StatusCode::Ok, s),
+                Err(e) => {
+                    log::error!("error=true module=web error={e:?} class=json-render");
+                    (
+                        StatusCode::InternalServerError,
+                        "server error, can't render data".to_string(),
+                    )
+                }
+            }
         }
         Err(e) => {
             log::error!("error=true module=db error={} query={}", e, &query);
@@ -203,22 +219,50 @@ fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
 
 fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
     let mut conn = db::connect_to_db();
-    let mut vec: Vec<Event> = Vec::new();
-    let tid = get_tid(req).unwrap();
+    let tid = match get_tid(req) {
+        Some(tid) => tid,
+        None => {
+            return (
+                StatusCode::BadRequest,
+                "could not get tenant id".to_string(),
+            );
+        }
+    };
 
-    for row in &conn.query("SELECT insertion_time, name, dict from monitoring.event where tenant_id = $1 order by insertion_time desc limit 100",
-                           &[&tid]).unwrap() {
-        vec.push(Event {
-            insertion_time: row.get(0),
-            d: EventIngest {
-                name: row.get(1),
-                dict: row.get(2),
-            },
-        });
-    }
+    let query = "SELECT insertion_time, name, dict from monitoring.event where tenant_id = $1 order by insertion_time desc limit 100";
+    let result = match conn.query(query, &[&tid]) {
+        Ok(rows) => {
+            let mut vec: Vec<Event> = Vec::new();
+            for row in &rows {
+                vec.push(Event {
+                    insertion_time: row.get(0),
+                    d: EventIngest {
+                        name: row.get(1),
+                        dict: row.get(2),
+                    },
+                });
+            }
 
-    let result = serde_json::to_string(&vec).unwrap();
-    (StatusCode::Ok, result)
+            match serde_json::to_string(&vec) {
+                Ok(s) => (StatusCode::Ok, s),
+                Err(e) => {
+                    log::error!("error=true module=web error={e:?} class=json-render");
+                    (
+                        StatusCode::InternalServerError,
+                        "server error, can't render data".to_string(),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("error=true module=db error={e:?} query={query}");
+            (
+                StatusCode::InternalServerError,
+                "server error, can't get data".to_string(),
+            )
+        }
+    };
+    result
 }
 
 // index /
@@ -240,8 +284,20 @@ fn get_tid(req: &Request) -> Option<i32> {
     match req.origin.headers.get_raw("X-TENANT-ID") {
         Some(s) => {
             let thread_string = s[0].to_vec();
-            let tid: i32 = String::from_utf8(thread_string).unwrap().parse().unwrap();
-            Some(tid)
+            let tid_string = match String::from_utf8(thread_string) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::info!("error=true module=web what='failed to parse tenant id from utf8' error='{e:?}'");
+                    return None;
+                }
+            };
+            match tid_string.parse() {
+                Ok(tid) => Some(tid),
+                Err(e) => {
+                    log::info!("error=true module=web what='failed to parse tenant id from string' error='{e:?}'");
+                    None
+                }
+            }
         }
         None => {
             log::info!(
@@ -259,28 +315,37 @@ impl ApiKeys {
         // reads monitoring.apikeys
         let mut conn = db::connect_to_db();
         let mut vec: Vec<i32> = Vec::new();
+        let query = "SELECT uid from monitoring.tenant where apikey = $1";
+        let result = conn.query(query, &[&k.to_string()]);
 
-        for row in &conn
-            .query(
-                "SELECT uid from monitoring.tenant where apikey = $1",
-                &[&k.to_string()],
-            )
-            .unwrap()
-        {
-            vec.push(row.get(0));
-        }
-
-        if !vec.is_empty() {
-            Some(vec[0])
-        } else {
-            None
+        match result {
+            Ok(rows) => {
+                for row in &rows {
+                    vec.push(row.get(0));
+                }
+                if !vec.is_empty() {
+                    Some(vec[0])
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                log::error!("error=true module=db error={e:?} query={query}");
+                None
+            }
         }
     }
 }
 
 #[allow(clippy::result_large_err)]
 fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
-    let path = _req.path_without_query().unwrap();
+    let path = match _req.path_without_query() {
+        Some(p) => p,
+        None => {
+            res.set(StatusCode::BadRequest);
+            return res.send("\"bad path\"");
+        }
+    };
     // Cutout for non-api routes.
     if !path.contains("api") {
         return res.next_middleware();
@@ -290,7 +355,14 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
         Some(s) => {
             let gatekeeper = ApiKeys {};
             let header = &s[0];
-            let key: String = String::from_utf8(header.to_vec()).unwrap();
+            let key = match String::from_utf8(header.to_vec()) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
+                    res.set(StatusCode::BadRequest);
+                    return res.send("\"api key failure\"");
+                }
+            };
             let apikeys = gatekeeper.check_keys(&key);
             match apikeys {
                 Some(v) => {
@@ -319,14 +391,22 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
 
 #[allow(clippy::result_large_err)]
 fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<'mw> {
+    let path = _req.path_without_query().unwrap_or("<no path>");
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
         Some(key) => {
             let header = &key[0];
-            let key: String = String::from_utf8(header.to_vec()).unwrap();
+            let key = match String::from_utf8(header.to_vec()) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
+                    // Don't fail the request, just log the error and move on.
+                    "<unparseable>".to_string()
+                }
+            };
             log::info!(
                 "module=web method={} url={} apikey={}",
                 &_req.origin.method.to_string(),
-                _req.path_without_query().unwrap(),
+                path,
                 &key,
             );
         }
@@ -334,7 +414,7 @@ fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<
             log::info!(
                 "module=web method={} url={}",
                 &_req.origin.method.to_string(),
-                _req.path_without_query().unwrap(),
+                path,
             );
         }
     }
@@ -394,7 +474,7 @@ fn launch_server(server_options: &ServerOptions) {
 
     server
         .listen(format!("0.0.0.0:{}", server_options.port))
-        .unwrap();
+        .expect("could not start server");
 }
 
 fn launch_query(qo: &QueryOptions) {
@@ -408,14 +488,29 @@ fn launch_query(qo: &QueryOptions) {
             let query = "SELECT insertion_time, name, dict from monitoring.event
 order by insertion_time desc
 limit $1";
-            for row in &conn.query(query, &[&last]).unwrap() {
-                vec.push(IntrusiveEvent {
-                    insertion_time: row.get(0),
-                    name: row.get(1),
-                    dict: row.get(2),
-                });
+            let result = match conn.query(query, &[&last]) {
+                Ok(rows) => {
+                    for row in &rows {
+                        vec.push(IntrusiveEvent {
+                            insertion_time: row.get(0),
+                            name: row.get(1),
+                            dict: row.get(2),
+                        });
+                    }
+                    serde_json::to_string_pretty(&vec)
+                }
+                Err(e) => {
+                    log::error!("error=true module=db error={e:?} query={query}");
+                    return;
+                }
+            };
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("error=true module=web error={e:?} class=json-render");
+                    return;
+                }
             }
-            serde_json::to_string_pretty(&vec).unwrap()
         }
         MetricTypeOption::M => {
             let mut vec: Vec<IntrusiveMeasure> = Vec::new();
@@ -423,16 +518,30 @@ limit $1";
 from monitoring.measure
 order by insertion_time desc
 limit $1";
-            for row in &conn.query(query, &[&last]).unwrap() {
-                vec.push(IntrusiveMeasure {
-                    insertion_time: row.get(0),
-                    name: row.get(1),
-                    measurement: row.get(2),
-                    dict: row.get(3),
-                });
+            let result = match conn.query(query, &[&last]) {
+                Ok(rows) => {
+                    for row in &rows {
+                        vec.push(IntrusiveMeasure {
+                            insertion_time: row.get(0),
+                            name: row.get(1),
+                            measurement: row.get(2),
+                            dict: row.get(3),
+                        });
+                    }
+                    serde_json::to_string_pretty(&vec)
+                }
+                Err(e) => {
+                    log::error!("error=true module=db error={e:?} query={query}");
+                    return;
+                }
+            };
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("error=true module=web error={e:?} class=json-render");
+                    return;
+                }
             }
-
-            serde_json::to_string_pretty(&vec).unwrap()
         }
     };
 
@@ -450,10 +559,15 @@ fn launch_writer(filename: String, apikey: String) {
 
     let mut file: Box<dyn Read> = match filename.as_str() {
         "-" => Box::new(io::stdin()),
-        // crashing here is ok if we can't open it.
         _ => {
             log::info!("opening {}", &filename);
-            Box::new(File::open(filename).unwrap())
+            match File::open(filename) {
+                Ok(f) => Box::new(f),
+                Err(e) => {
+                    log::error!("error=true module=fs error={e:?} class=file-open");
+                    panic!("could not open file");
+                }
+            }
         }
     };
 
@@ -485,10 +599,14 @@ fn launch_writer(filename: String, apikey: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        writemeasure(&mut conn, tid, measure).unwrap();
+                                        if let Err(e) = writemeasure(&mut conn, tid, measure) {
+                                            log::error!("error=true module=db error={e:?} class=measure-write");
+                                        }
                                     }
                                     PipeReader::E(event) => {
-                                        writeevent(&mut conn, tid, event).unwrap();
+                                        if let Err(e) = writeevent(&mut conn, tid, event) {
+                                            log::error!("error=true module=db error={e:?} class=event-write");
+                                        }
                                     }
                                 }
                                 log::info!("status=written");

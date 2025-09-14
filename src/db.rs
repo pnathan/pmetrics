@@ -88,7 +88,13 @@ impl PgConn for PostgresClientArgs {
         };
 
         let pgport = match envmap.get("PGPORT") {
-            Some(s) => s.parse::<u16>().unwrap(),
+            Some(s) => match s.parse::<u16>() {
+                Ok(p) => p,
+                Err(err) => {
+                    log::info!("error=true module=db class=env-parse-int value={s} error={err:?}");
+                    5432
+                }
+            },
             None => 5432,
         };
         let pghost = match envmap.get("PGHOST") {
@@ -131,7 +137,8 @@ fn get_connection_string() -> String {
 pub fn connect_to_db() -> postgres::Client {
     let cs = get_connection_string();
 
-    let conn = Client::connect(cs.as_str(), NoTls).unwrap();
+    let conn = Client::connect(cs.as_str(), NoTls).expect("could not connect to database");
+
     log::info!("started pg conn");
 
     conn
