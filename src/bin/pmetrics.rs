@@ -5,6 +5,7 @@ pmetrics entry point
 extern crate nickel;
 
 use clap::{Parser, Subcommand};
+use log::LevelFilter;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -17,46 +18,9 @@ use nickel::{/* QueryString, */ HttpRouter, MiddlewareResult, Nickel, Request, R
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 // this is /not obvious/.
-use pmetrics::audit;
+use log;
 use pmetrics::db;
 use serde_json::Value;
-use std::mem;
-use std::sync::{Arc, Mutex, Once};
-
-#[derive(Clone)]
-struct SingletonReader {
-    inner: Arc<Mutex<audit::Audit>>,
-}
-
-impl SingletonReader {
-    fn get(&self) -> audit::Audit {
-        *self.inner.lock().unwrap()
-    }
-}
-
-fn recorder() -> SingletonReader {
-    // !! null pointer.
-    static mut SINGLETON: *const SingletonReader = 0 as *const SingletonReader;
-    static ONCE: Once = Once::new();
-
-    unsafe {
-        ONCE.call_once(|| {
-            // Make it
-            let singleton = SingletonReader {
-                inner: Arc::new(Mutex::new(audit::Audit {
-                    level: audit::ConcernLevel::Crisis,
-                    t: audit::AuditTarget::Stderr(),
-                })),
-            };
-
-            // Put it in the heap so it can outlive this call
-            SINGLETON = mem::transmute(Box::new(singleton));
-        });
-
-        // Now we give out a copy of the data that is safe to use concurrently.
-        (*SINGLETON).clone()
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct MeasureIngest {
@@ -127,14 +91,7 @@ where
     match req.origin.read_to_string(&mut buffer) {
         Ok(_) => {} // no-op
         Err(_) => {
-            recorder().get().info(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "web",
-                "class",
-                "string read",
-            ]));
+            log::info!("error=true module=web class=string_read");
             return (StatusCode::BadRequest, "unable to read string".to_string());
         }
     }
@@ -142,42 +99,22 @@ where
     let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
     match v {
         Ok(deserialized) => {
-            let mut conn = db::connect_to_db(&recorder().get());
+            let mut conn = db::connect_to_db();
             match insert_function(&mut conn, &deserialized) {
                 Ok(_) => (StatusCode::Ok, "ok".to_string()),
                 Err(err) => {
-                    recorder().get().debug(audit::eventw(&[
-                        "error",
-                        "true",
-                        "module",
-                        "web",
-                        "class",
-                        "db insert",
-                        "details",
-                        &err.to_string(),
-                    ]));
-                    recorder().get().info(audit::eventw(&[
-                        "error",
-                        "true",
-                        "module",
-                        "web",
-                        "class",
-                        "db insert",
-                    ]));
+                    log::debug!(
+                        "error=true module=web class=db_insert details={}",
+                        err.to_string()
+                    );
+                    log::info!("error=true module=web class=db_insert");
                     (StatusCode::BadGateway, "server error".to_string())
                 }
             }
         }
 
         Err(_) => {
-            recorder().get().info(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "web",
-                "class",
-                "deserialize/parse",
-            ]));
+            log::info!("error=true module=web class=deserialize/parse");
             (StatusCode::BadRequest, "bad parse and cast".to_string())
         }
     }
@@ -202,14 +139,7 @@ fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            recorder().get().info(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "web",
-                "what",
-                "failed to get the x tenant id from the middleware",
-            ]));
+            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
             (StatusCode::BadRequest, "\"key failure\"".to_string())
         }
     }
@@ -217,7 +147,7 @@ fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
 
 // TODO: dry up.
 fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    let mut conn = db::connect_to_db(&recorder().get());
+    let mut conn = db::connect_to_db();
     let tid = get_tid(req).unwrap();
 
     let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure where tenant_id = $1 order by insertion_time desc limit 100";
@@ -238,16 +168,11 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             (StatusCode::Ok, result)
         }
         Err(e) => {
-            recorder().get().crisis(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "db",
-                "error",
-                e.to_string().as_str(),
-                "query",
-                &query,
-            ]));
+            log::error!(
+                "error=true module=db error={} query={}",
+                e.to_string(),
+                &query
+            );
             (
                 StatusCode::InternalServerError,
                 "server error, can't get data".to_string(),
@@ -277,21 +202,14 @@ fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            recorder().get().info(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "web",
-                "what",
-                "failed to get the x tenant id from the middleware",
-            ]));
+            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
             (StatusCode::BadRequest, "\"key failure\"".to_string())
         }
     }
 }
 
 fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    let mut conn = db::connect_to_db(&recorder().get());
+    let mut conn = db::connect_to_db();
     let mut vec: Vec<Event> = Vec::new();
     let tid = get_tid(req).unwrap();
 
@@ -318,7 +236,7 @@ fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
 // healthz - am I alive?
 // does not check database liveness though.
 fn healthz(_req: &mut Request) -> (nickel::status::StatusCode, String) {
-    recorder().get().info(audit::event("healthz", "true"));
+    log::info!("healthz");
     (StatusCode::Ok, "ok".to_string())
 }
 
@@ -333,14 +251,7 @@ fn get_tid(req: &Request) -> Option<i32> {
             return Some(tid);
         }
         None => {
-            recorder().get().info(audit::eventw(&[
-                "error",
-                "true",
-                "module",
-                "web",
-                "what",
-                "failed to get the x tenant id from the middleware",
-            ]));
+            log::info!("error=true module=web what='failed to get the x tenant id from the middleware'");
             None
         }
     }
@@ -351,7 +262,7 @@ struct ApiKeys;
 impl ApiKeys {
     fn check_keys(&self, k: &str) -> Option<i32> {
         // reads monitoring.apikeys
-        let mut conn = db::connect_to_db(&recorder().get());
+        let mut conn = db::connect_to_db();
         let mut vec: Vec<i32> = Vec::new();
 
         for row in &conn
@@ -410,53 +321,31 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
     res.next_middleware()
 }
 
-fn info(pairs: &[&str]) -> () {
-    recorder().get().info(audit::eventw(pairs));
-}
-
 fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<'mw> {
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
         Some(key) => {
             let header = &key[0];
             let key: String = String::from_utf8(header.to_vec()).unwrap();
-            info(&[
-                "module",
-                "web",
-                "method",
+            log::info!(
+                "module=web method={} url={} apikey={}",
                 &_req.origin.method.to_string(),
-                "url",
                 _req.path_without_query().unwrap(),
-                //                   "code", &res.status().to_string(),
-                "apikey",
                 &key,
-            ]);
+            );
         }
         None => {
-            info(&[
-                "module",
-                "web",
-                "method",
+            log::info!(
+                "module=web method={} url={}",
                 &_req.origin.method.to_string(),
-                "url",
                 _req.path_without_query().unwrap(),
-                //                   "code", &res.status().to_string()
-            ])
+            );
         }
     }
     res.next_middleware()
 }
 
-fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
-    //    *Arc::get_mut(&mut recorder).unwrap() = &audit::Audit::new(*cl);
-    *recorder().inner.lock().unwrap() = audit::Audit {
-        level: *cl,
-        t: audit::AuditTarget::Stderr(),
-    };
-
-    recorder()
-        .get()
-        .info(audit::event("message", "server initializing"));
-
+fn launch_server(server_options: &ServerOptions) {
+    log::info!("message='server initializing'");
     let mut server = Nickel::new();
 
     server.get(
@@ -504,19 +393,15 @@ fn launch_server(cl: &audit::ConcernLevel, server_options: &ServerOptions) {
         },
     );
 
-    recorder().get().info(audit::event(
-        "server starting",
-        &format!("{}", server_options.port),
-    ));
+    log::info!("server starting on port {}", server_options.port);
 
     server
         .listen(format!("0.0.0.0:{}", server_options.port))
         .unwrap();
 }
 
-fn launch_query(cl: &audit::ConcernLevel, qo: &QueryOptions) {
-    let auditor = audit::Audit::new(*cl);
-    let mut conn = db::connect_to_db(&auditor);
+fn launch_query(qo: &QueryOptions) {
+    let mut conn = db::connect_to_db();
     println!("{:?}", qo);
     // pg / rust-postgres demand i64 as the type to be passed in.
     let last: i64 = qo.last.into();
@@ -563,15 +448,14 @@ enum PipeReader {
     E(EventIngest),
 }
 
-fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
-    let auditor = audit::Audit::new(*cl);
-    let mut conn = db::connect_to_db(&auditor);
+fn launch_writer(filename: String, apikey: String) {
+    let mut conn = db::connect_to_db();
 
     let mut file: Box<dyn Read> = match filename.as_str() {
         "-" => Box::new(io::stdin()),
         // crashing here is ok if we can't open it.
         _ => {
-            auditor.info(audit::event("opening", &filename));
+            log::info!("opening {}", &filename);
             Box::new(File::open(filename).unwrap())
         }
     };
@@ -580,7 +464,7 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
     let tid: i32 = match gatekeeper.check_keys(&apikey) {
         Some(i) => i,
         None => {
-            auditor.info(audit::event("api key failure", &apikey));
+            log::info!("api key failure {}", &apikey);
             panic!("api key didn't work");
         }
     };
@@ -595,7 +479,7 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
         match result {
             Ok(bytecount) => {
                 if bytecount > 0 {
-                    auditor.info(audit::event("status", "rx"));
+                    log::info!("status=rx");
                     let v: Result<Vec<PipeReader>, serde_json::Error> =
                         serde_json::from_str(&buffer);
 
@@ -610,17 +494,17 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
                                         writeevent(&mut conn, tid.clone(), event).unwrap();
                                     }
                                 }
-                                auditor.info(audit::event("status", "written"));
+                                log::info!("status=written");
                             }
                         }
                         Err(e) => {
-                            auditor.crisis(audit::event("err", &format!("{:?}", e)));
+                            log::error!("err={:?}", e);
                         }
                     }
                 }
             }
             Err(e) => {
-                auditor.info(audit::event("err", &format!("{:?}", e)));
+                log::info!("err={:?}", e);
             }
         }
 
@@ -628,11 +512,6 @@ fn launch_writer(cl: &audit::ConcernLevel, filename: String, apikey: String) {
         let one = time::Duration::from_secs(1);
         thread::sleep(one);
     }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct GlobalOptions {
-    verbosity: audit::ConcernLevel,
 }
 
 #[derive(Debug)]
@@ -678,9 +557,9 @@ struct QueryOptions {
 
 #[derive(Debug)]
 enum Command {
-    PipeReader(GlobalOptions, CliOptions),
-    Server(GlobalOptions, ServerOptions, ServerType),
-    Querier(GlobalOptions, QueryOptions),
+    PipeReader(CliOptions),
+    Server(ServerOptions, ServerType),
+    Querier(QueryOptions),
 }
 
 #[derive(Debug, Subcommand)]
@@ -717,83 +596,72 @@ struct Cli {
     cmd: PmetricsMode,
 }
 
-fn clapparser() -> Command {
+fn clapparser() -> (Command, u8) {
     let cli = Cli::parse();
 
-    let cl = match cli.v {
-        0 => audit::ConcernLevel::Crisis,
-        1 => audit::ConcernLevel::Info,
-        2 | _ => audit::ConcernLevel::Debug,
-    };
+    let cmd = match cli.cmd {
+        PmetricsMode::Server { server_type, port } => {
+            let st = match server_type.as_str() {
+                "http" => ServerType::Http,
+                _ => panic!("Unable to start server, crashing. specify type http"),
+            };
 
-    let go = GlobalOptions { verbosity: cl };
-    {
-        match cli.cmd {
-            PmetricsMode::Server { server_type, port } => {
-                let st = match server_type.as_str() {
-                    "http" => ServerType::Http,
-                    _ => panic!("Unable to start server, crashing. specify type http"),
-                };
+            let so = ServerOptions { port: port };
 
-                let so = ServerOptions { port: port };
-
-                return Command::Server(go, so, st);
-            }
-            PmetricsMode::Pipe { file, api_key } => {
-                return Command::PipeReader(
-                    go,
-                    CliOptions {
-                        filename: file,
-                        apikey: api_key,
-                    },
-                );
-            }
-            PmetricsMode::Querier {
-                metric_type,
-                last,
-                format,
-                stream,
-            } => {
-                let mt = match metric_type.as_str() {
-                    "m" => MetricTypeOption::M,
-                    "e" => MetricTypeOption::E,
-                    _ => panic!("not a valid metric type - try m or e"),
-                };
-
-                let fmt = match format.as_str() {
-                    "json" => OutputFormat::Json,
-                    "table" => OutputFormat::Table,
-                    _ => panic!("not a valid output format - try json or table"),
-                };
-
-                let qo = QueryOptions {
-                    metric_type: mt,
-                    last: last,
-                    streaming: stream,
-                    format: fmt,
-                };
-                return Command::Querier(go, qo);
-            }
+            Command::Server(so, st)
         }
-    }
+        PmetricsMode::Pipe { file, api_key } => Command::PipeReader(CliOptions {
+            filename: file,
+            apikey: api_key,
+        }),
+        PmetricsMode::Querier {
+            metric_type,
+            last,
+            format,
+            stream,
+        } => {
+            let mt = match metric_type.as_str() {
+                "m" => MetricTypeOption::M,
+                "e" => MetricTypeOption::E,
+                _ => panic!("not a valid metric type - try m or e"),
+            };
+
+            let fmt = match format.as_str() {
+                "json" => OutputFormat::Json,
+                "table" => OutputFormat::Table,
+                _ => panic!("not a valid output format - try json or table"),
+            };
+
+            let qo = QueryOptions {
+                metric_type: mt,
+                last: last,
+                streaming: stream,
+                format: fmt,
+            };
+            Command::Querier(qo)
+        }
+    };
+    (cmd, cli.v)
 }
 
 fn main() {
-    let cmd = clapparser();
+    let (cmd, verbosity) = clapparser();
 
-    let cl = match cmd {
-        Command::Server(go, _, _) => go.verbosity,
-        Command::PipeReader(go, _) => go.verbosity,
-        Command::Querier(go, _) => go.verbosity,
+    let log_level = match verbosity {
+        0 => LevelFilter::Error,
+        1 => LevelFilter::Info,
+        _ => LevelFilter::Debug,
     };
 
+    env_logger::Builder::new().filter_level(log_level).init();
+
     match cmd {
-        Command::Server(_, server_options, servertype) => match servertype {
-            ServerType::Http => launch_server(&cl, &server_options),
+        Command::Server(server_options, servertype) => match servertype {
+            ServerType::Http => launch_server(&server_options),
         },
-        Command::PipeReader(_, clioptions) => {
-            launch_writer(&cl, clioptions.filename, clioptions.apikey)
+        Command::PipeReader(clioptions) => {
+            launch_writer(clioptions.filename, clioptions.apikey)
         }
-        Command::Querier(_, qo) => launch_query(&cl, &qo),
+        Command::Querier(qo) => launch_query(&qo),
     }
 }

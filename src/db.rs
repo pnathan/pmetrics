@@ -4,7 +4,7 @@ use postgres::{Client, NoTls};
 use std::collections::HashMap;
 use std::env;
 
-use crate::audit;
+use log;
 
 trait PgConn {
     fn from_env() -> Self
@@ -128,13 +128,11 @@ fn get_connection_string() -> String {
     }
 }
 
-pub fn connect_to_db(auditor: &audit::Audit) -> postgres::Client {
+pub fn connect_to_db() -> postgres::Client {
     let cs = get_connection_string();
 
     let conn = Client::connect(cs.as_str(), NoTls).unwrap();
-    auditor.tell(&audit::Concern::Info(audit::Event::new(
-        "started", "pg conn",
-    )));
+    log::info!("started pg conn");
 
     conn
 }
