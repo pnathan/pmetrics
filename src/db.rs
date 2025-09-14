@@ -91,9 +91,7 @@ impl PgConn for PostgresClientArgs {
             Some(s) => match s.parse::<u16>() {
                 Ok(p) => p,
                 Err(err) => {
-                    log::info!(
-                        "error=true module=db class=env-parse-int value={s} error={err:?}"
-                    );
+                    log::info!("error=true module=db class=env-parse-int value={s} error={err:?}");
                     5432
                 }
             },

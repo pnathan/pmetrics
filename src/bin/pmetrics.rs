@@ -236,7 +236,10 @@ fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             for row in &rows {
                 vec.push(Event {
                     insertion_time: row.get(0),
-                    d: EventIngest { name: row.get(1), dict: row.get(2) },
+                    d: EventIngest {
+                        name: row.get(1),
+                        dict: row.get(2),
+                    },
                 });
             }
 
