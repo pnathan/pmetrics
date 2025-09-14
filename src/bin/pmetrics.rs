@@ -395,7 +395,7 @@ fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<
         Some(p) => p,
         None => {
             // Still log the request, but with a placeholder for the path.
-            "<no path>".to_string()
+            "<no path>"
         }
     };
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
