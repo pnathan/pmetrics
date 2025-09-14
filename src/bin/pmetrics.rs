@@ -18,7 +18,6 @@ use nickel::{/* QueryString, */ HttpRouter, MiddlewareResult, Nickel, Request, R
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 // this is /not obvious/.
-use log;
 use pmetrics::db;
 use serde_json::Value;
 
@@ -78,10 +77,7 @@ struct Event {
 
 // TODO: Write a Search api.
 
-fn generic_post<'a, T, F>(
-    req: &'a mut Request,
-    insert_function: F,
-) -> (nickel::status::StatusCode, String)
+fn generic_post<T, F>(req: &mut Request, insert_function: F) -> (nickel::status::StatusCode, String)
 where
     T: DeserializeOwned,
     F: Fn(&mut postgres::Client, &T) -> Result<u64, postgres::Error>,
@@ -103,10 +99,7 @@ where
             match insert_function(&mut conn, &deserialized) {
                 Ok(_) => (StatusCode::Ok, "ok".to_string()),
                 Err(err) => {
-                    log::debug!(
-                        "error=true module=web class=db_insert details={}",
-                        err.to_string()
-                    );
+                    log::debug!("error=true module=web class=db_insert details={}", err);
                     log::info!("error=true module=web class=db_insert");
                     (StatusCode::BadGateway, "server error".to_string())
                 }
@@ -170,11 +163,7 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             (StatusCode::Ok, result)
         }
         Err(e) => {
-            log::error!(
-                "error=true module=db error={} query={}",
-                e.to_string(),
-                &query
-            );
+            log::error!("error=true module=db error={} query={}", e, &query);
             (
                 StatusCode::InternalServerError,
                 "server error, can't get data".to_string(),
@@ -250,9 +239,9 @@ fn healthz(_req: &mut Request) -> (nickel::status::StatusCode, String) {
 fn get_tid(req: &Request) -> Option<i32> {
     match req.origin.headers.get_raw("X-TENANT-ID") {
         Some(s) => {
-            let thread_string = (&s[0]).to_vec();
+            let thread_string = s[0].to_vec();
             let tid: i32 = String::from_utf8(thread_string).unwrap().parse().unwrap();
-            return Some(tid);
+            Some(tid)
         }
         None => {
             log::info!(
@@ -281,10 +270,10 @@ impl ApiKeys {
             vec.push(row.get(0));
         }
 
-        if vec.len() > 0 {
-            return Some(vec[0].clone());
+        if !vec.is_empty() {
+            Some(vec[0])
         } else {
-            return None;
+            None
         }
     }
 }
@@ -408,7 +397,7 @@ fn launch_server(server_options: &ServerOptions) {
 
 fn launch_query(qo: &QueryOptions) {
     let mut conn = db::connect_to_db();
-    println!("{:?}", qo);
+    println!("{qo:?}");
     // pg / rust-postgres demand i64 as the type to be passed in.
     let last: i64 = qo.last.into();
     let printable = match qo.metric_type {
@@ -445,7 +434,7 @@ limit $1";
         }
     };
 
-    println!("{}", printable);
+    println!("{printable}");
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -597,7 +586,7 @@ fn clapparser() -> (Command, u8) {
                 _ => panic!("Unable to start server, crashing. specify type http"),
             };
 
-            let so = ServerOptions { port: port };
+            let so = ServerOptions { port };
 
             Command::Server(so, st)
         }
@@ -616,7 +605,7 @@ fn clapparser() -> (Command, u8) {
 
             let qo = QueryOptions {
                 metric_type: mt,
-                last: last,
+                last,
             };
             Command::Querier(qo)
         }

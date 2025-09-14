@@ -96,7 +96,7 @@ impl PgConn for PostgresClientArgs {
             None => "localhost",
         };
 
-        eprintln!("{} {} {} {}", pguser, pghost, pgport, pgdb);
+        eprintln!("{pguser} {pghost} {pgport} {pgdb}");
 
         PostgresClientArgs {
             user: pguser.to_string(),
