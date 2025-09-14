@@ -278,6 +278,7 @@ impl ApiKeys {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
     let path = _req.path_without_query().unwrap();
     // Cutout for non-api routes.
@@ -316,6 +317,7 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
     res.next_middleware()
 }
 
+#[allow(clippy::result_large_err)]
 fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<'mw> {
     match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
         Some(key) => {
