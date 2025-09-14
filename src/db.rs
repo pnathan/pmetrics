@@ -1,10 +1,10 @@
 extern crate postgres;
-use percent_encoding_rfc3986::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding_rfc3986::{utf8_percent_encode, NON_ALPHANUMERIC};
 use postgres::{Client, NoTls};
 use std::collections::HashMap;
 use std::env;
 
-use crate::audit;
+use log;
 
 trait PgConn {
     fn from_env() -> Self
@@ -22,7 +22,7 @@ struct PostgresSocketClientArgs {
 
 impl PgConn for PostgresSocketClientArgs {
     fn from_env() -> PostgresSocketClientArgs {
-        let envmap: HashMap<String, String> = env::vars().into_iter().collect();
+        let envmap: HashMap<String, String> = env::vars().collect();
 
         let pguser = match envmap.get("PGUSER") {
             Some(s) => s,
@@ -71,7 +71,7 @@ struct PostgresClientArgs {
 
 impl PgConn for PostgresClientArgs {
     fn from_env() -> PostgresClientArgs {
-        let envmap: HashMap<String, String> = env::vars().into_iter().collect();
+        let envmap: HashMap<String, String> = env::vars().collect();
 
         let pguser = match envmap.get("PGUSER") {
             Some(s) => s,
@@ -96,7 +96,7 @@ impl PgConn for PostgresClientArgs {
             None => "localhost",
         };
 
-        eprintln!("{} {} {} {}", pguser, pghost, pgport, pgdb);
+        eprintln!("{pguser} {pghost} {pgport} {pgdb}");
 
         PostgresClientArgs {
             user: pguser.to_string(),
@@ -120,21 +120,19 @@ impl PgConn for PostgresClientArgs {
 
 // hacky facade for different env var combos.
 fn get_connection_string() -> String {
-    let envmap: HashMap<String, String> = env::vars().into_iter().collect();
-    if let Some(_) = envmap.get("INSTANCE_UNIX_SOCKET") {
+    let envmap: HashMap<String, String> = env::vars().collect();
+    if envmap.contains_key("INSTANCE_UNIX_SOCKET") {
         PostgresSocketClientArgs::from_env().connection_string()
     } else {
         PostgresClientArgs::from_env().connection_string()
     }
 }
 
-pub fn connect_to_db(auditor: &audit::Audit) -> postgres::Client {
+pub fn connect_to_db() -> postgres::Client {
     let cs = get_connection_string();
 
     let conn = Client::connect(cs.as_str(), NoTls).unwrap();
-    auditor.tell(&audit::Concern::Info(audit::Event::new(
-        "started", "pg conn",
-    )));
+    log::info!("started pg conn");
 
     conn
 }
