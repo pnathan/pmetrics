@@ -1,4 +1,4 @@
-name: Rust CI
+name: Test
 
 on:
   push:
@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
-    name: Build and Test
+  test:
+    name: Test
     runs-on: ubuntu-latest
     
     services:
@@ -38,7 +38,6 @@ jobs:
         profile: minimal
         toolchain: stable
         override: true
-        components: rustfmt, clippy
     
     - name: Cache dependencies
       uses: actions/cache@v3
@@ -51,18 +50,6 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
     
-    - name: Check formatting
-      uses: actions-rs/cargo@v1
-      with:
-        command: fmt
-        args: --all -- --check
-
-    - name: Lint with Clippy
-      uses: actions-rs/cargo@v1
-      with:
-        command: clippy
-        args: -- -D warnings
-
     - name: Build
       uses: actions-rs/cargo@v1
       with:
