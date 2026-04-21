@@ -1,22 +1,24 @@
 /**
 pmetrics entry point
  **/
-#[macro_use]
-extern crate nickel;
-
+use axum::{
+    extract::Extension,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
+    routing::{get, post},
+    Json, Router,
+};
 use clap::{Parser, Subcommand};
 use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::{thread, time};
+use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
 
-use nickel::status::StatusCode;
-use nickel::{/* QueryString, */ HttpRouter, MiddlewareResult, Nickel, Request, Response};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-// this is /not obvious/.
 use pmetrics::db;
 use serde_json::Value;
 
@@ -60,6 +62,9 @@ struct Event {
     insertion_time: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy)]
+struct TenantId(i32);
+
 // TODO: Api should have an accept: application/json request type, along with appropriate error codes.
 // Said error codes will be:
 //
@@ -76,42 +81,6 @@ struct Event {
 
 // TODO: Write a Search api.
 
-fn generic_post<T, F>(req: &mut Request, insert_function: F) -> (nickel::status::StatusCode, String)
-where
-    T: DeserializeOwned,
-    F: Fn(&mut postgres::Client, &T) -> Result<u64, postgres::Error>,
-{
-    let mut buffer = String::new();
-
-    match req.origin.read_to_string(&mut buffer) {
-        Ok(_) => {} // no-op
-        Err(_) => {
-            tracing::info!("error=true module=web class=string_read");
-            return (StatusCode::BadRequest, "unable to read string".to_string());
-        }
-    }
-
-    let v: Result<T, serde_json::Error> = serde_json::from_str(&buffer);
-    match v {
-        Ok(deserialized) => {
-            let mut conn = db::connect_to_db();
-            match insert_function(&mut conn, &deserialized) {
-                Ok(_) => (StatusCode::Ok, "ok".to_string()),
-                Err(err) => {
-                    tracing::debug!("error=true module=web class=db_insert details={err}");
-                    tracing::info!("error=true module=web class=db_insert");
-                    (StatusCode::BadGateway, "server error".to_string())
-                }
-            }
-        }
-
-        Err(_) => {
-            tracing::info!("error=true module=web class=deserialize/parse");
-            (StatusCode::BadRequest, "bad parse and cast".to_string())
-        }
-    }
-}
-
 fn writemeasure(
     conn: &mut postgres::Client,
     tid: i32,
@@ -121,70 +90,52 @@ fn writemeasure(
                  &[&l.name, &tid, &l.measurement, &l.dict])
 }
 
-fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    match get_tid(req) {
-        Some(tid) => {
-            let f = |conn: &mut postgres::Client,
-                     l: &MeasureIngest|
-             -> Result<u64, postgres::Error> { writemeasure(conn, tid, l) };
-
-            generic_post(req, f)
-        }
-        None => {
-            tracing::info!(
-                "error=true module=web what='failed to get the x tenant id from the middleware'"
-            );
-            (StatusCode::BadRequest, "\"key failure\"".to_string())
-        }
-    }
+async fn post_measure(
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Json(body): Json<MeasureIngest>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || {
+        let mut conn = db::connect_to_db();
+        writemeasure(&mut conn, tid, &body)
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
+    .map(|_| StatusCode::OK)
+    .map_err(|e| {
+        tracing::error!(?e, "db insert measure");
+        (StatusCode::BAD_GATEWAY, "server error")
+    })
 }
 
-// TODO: dry up.
-fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    let mut conn = db::connect_to_db();
-    let tid = match get_tid(req) {
-        Some(tid) => tid,
-        None => {
-            return (
-                StatusCode::BadRequest,
-                "could not get tenant id".to_string(),
-            );
-        }
-    };
-
-    let query = "SELECT insertion_time, name, measurement, dict from monitoring.measure where tenant_id = $1 order by insertion_time desc limit 100";
-    match conn.query(query, &[&tid]) {
-        Ok(rows) => {
-            let mut vec: Vec<Measure> = Vec::new();
-            for row in &rows {
-                vec.push(Measure {
-                    insertion_time: row.get(0),
-                    d: MeasureIngest {
-                        name: row.get(1),
-                        measurement: row.get(2),
-                        dict: row.get(3),
-                    },
-                });
-            }
-            match serde_json::to_string(&vec) {
-                Ok(s) => (StatusCode::Ok, s),
-                Err(e) => {
-                    tracing::error!("error=true module=web error={e:?} class=json-render");
-                    (
-                        StatusCode::InternalServerError,
-                        "server error, can't render data".to_string(),
-                    )
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("error=true module=db error={} query={}", e, &query);
-            (
-                StatusCode::InternalServerError,
-                "server error, can't get data".to_string(),
-            )
-        }
-    }
+async fn get_measure(
+    Extension(TenantId(tid)): Extension<TenantId>,
+) -> Result<Json<Vec<Measure>>, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<Measure>, postgres::Error> {
+        let mut conn = db::connect_to_db();
+        let rows = conn.query(
+            "SELECT insertion_time, name, measurement, dict from monitoring.measure \
+             where tenant_id = $1 order by insertion_time desc limit 100",
+            &[&tid],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|row| Measure {
+                insertion_time: row.get(0),
+                d: MeasureIngest {
+                    name: row.get(1),
+                    measurement: row.get(2),
+                    dict: row.get(3),
+                },
+            })
+            .collect())
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
+    .map(Json)
+    .map_err(|e| {
+        tracing::error!(?e, "db query measures");
+        (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })
 }
 
 fn writeevent(
@@ -198,282 +149,115 @@ fn writeevent(
     )
 }
 
-fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    match get_tid(req) {
-        Some(tid) => {
-            let f = |conn: &mut postgres::Client,
-                     l: &EventIngest|
-             -> Result<u64, postgres::Error> { writeevent(conn, tid, l) };
-
-            generic_post(req, f)
-        }
-        None => {
-            tracing::info!(
-                "error=true module=web what='failed to get the x tenant id from the middleware'"
-            );
-            (StatusCode::BadRequest, "\"key failure\"".to_string())
-        }
-    }
+async fn post_event(
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Json(body): Json<EventIngest>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || {
+        let mut conn = db::connect_to_db();
+        writeevent(&mut conn, tid, &body)
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
+    .map(|_| StatusCode::OK)
+    .map_err(|e| {
+        tracing::error!(?e, "db insert event");
+        (StatusCode::BAD_GATEWAY, "server error")
+    })
 }
 
-fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
-    let mut conn = db::connect_to_db();
-    let tid = match get_tid(req) {
-        Some(tid) => tid,
-        None => {
-            return (
-                StatusCode::BadRequest,
-                "could not get tenant id".to_string(),
-            );
-        }
-    };
-
-    let query = "SELECT insertion_time, name, dict from monitoring.event where tenant_id = $1 order by insertion_time desc limit 100";
-    let result = match conn.query(query, &[&tid]) {
-        Ok(rows) => {
-            let mut vec: Vec<Event> = Vec::new();
-            for row in &rows {
-                vec.push(Event {
-                    insertion_time: row.get(0),
-                    d: EventIngest {
-                        name: row.get(1),
-                        dict: row.get(2),
-                    },
-                });
-            }
-
-            match serde_json::to_string(&vec) {
-                Ok(s) => (StatusCode::Ok, s),
-                Err(e) => {
-                    tracing::error!("error=true module=web error={e:?} class=json-render");
-                    (
-                        StatusCode::InternalServerError,
-                        "server error, can't render data".to_string(),
-                    )
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("error=true module=db error={e:?} query={query}");
-            (
-                StatusCode::InternalServerError,
-                "server error, can't get data".to_string(),
-            )
-        }
-    };
-    result
+async fn get_event(
+    Extension(TenantId(tid)): Extension<TenantId>,
+) -> Result<Json<Vec<Event>>, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<Event>, postgres::Error> {
+        let mut conn = db::connect_to_db();
+        let rows = conn.query(
+            "SELECT insertion_time, name, dict from monitoring.event \
+             where tenant_id = $1 order by insertion_time desc limit 100",
+            &[&tid],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|row| Event {
+                insertion_time: row.get(0),
+                d: EventIngest {
+                    name: row.get(1),
+                    dict: row.get(2),
+                },
+            })
+            .collect())
+    })
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
+    .map(Json)
+    .map_err(|e| {
+        tracing::error!(?e, "db query events");
+        (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })
 }
 
-// index /
-fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
-    (StatusCode::Ok, "welcome to nickel'd pmetrics".to_string())
+async fn root() -> &'static str {
+    "welcome to pmetrics"
 }
 
-// healthz - am I alive?
-// does not check database liveness though.
-fn healthz(_req: &mut Request) -> (nickel::status::StatusCode, String) {
+async fn healthz() -> &'static str {
     tracing::info!("healthz");
-    (StatusCode::Ok, "ok".to_string())
+    "ok"
 }
 
 //////////////////////////////
 // API KEY / tenant middleware.
 
-fn get_tid(req: &Request) -> Option<i32> {
-    match req.origin.headers.get_raw("X-TENANT-ID") {
-        Some(s) => {
-            let thread_string = s[0].to_vec();
-            let tid_string = match String::from_utf8(thread_string) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::info!("error=true module=web what='failed to parse tenant id from utf8' error='{e:?}'");
-                    return None;
-                }
-            };
-            match tid_string.parse() {
-                Ok(tid) => Some(tid),
-                Err(e) => {
-                    tracing::info!("error=true module=web what='failed to parse tenant id from string' error='{e:?}'");
-                    None
-                }
-            }
-        }
-        None => {
-            tracing::info!(
-                "error=true module=web what='failed to get the x tenant id from the middleware'"
-            );
+fn lookup_tenant_by_key(k: &str) -> Option<i32> {
+    let mut conn = db::connect_to_db();
+    let query = "SELECT uid from monitoring.tenant where apikey = $1";
+    match conn.query(query, &[&k.to_string()]) {
+        Ok(rows) => rows.first().map(|row| row.get(0)),
+        Err(e) => {
+            tracing::error!("error=true module=db error={e:?} query={query}");
             None
         }
     }
 }
 
-struct ApiKeys;
+async fn check_api_keys(
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let key = req
+        .headers()
+        .get("X-PMETRICS-API-KEY")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?
+        .to_string();
 
-impl ApiKeys {
-    fn check_keys(&self, k: &str) -> Option<i32> {
-        // reads monitoring.apikeys
-        let mut conn = db::connect_to_db();
-        let mut vec: Vec<i32> = Vec::new();
-        let query = "SELECT uid from monitoring.tenant where apikey = $1";
-        let result = conn.query(query, &[&k.to_string()]);
+    let tid = tokio::task::spawn_blocking(move || lookup_tenant_by_key(&key))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::FORBIDDEN)?;
 
-        match result {
-            Ok(rows) => {
-                for row in &rows {
-                    vec.push(row.get(0));
-                }
-                if !vec.is_empty() {
-                    Some(vec[0])
-                } else {
-                    None
-                }
-            }
-            Err(e) => {
-                tracing::error!("error=true module=db error={e:?} query={query}");
-                None
-            }
-        }
-    }
+    req.extensions_mut().insert(TenantId(tid));
+    Ok(next.run(req).await)
 }
 
-#[allow(clippy::result_large_err)]
-fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> MiddlewareResult<'mw> {
-    let path = match _req.path_without_query() {
-        Some(p) => p,
-        None => {
-            res.set(StatusCode::BadRequest);
-            return res.send("\"bad path\"");
-        }
-    };
-    // Cutout for non-api routes.
-    if !path.contains("api") {
-        return res.next_middleware();
-    }
+async fn launch_server(server_options: &ServerOptions) {
+    tracing::info!("server initializing");
 
-    match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
-        Some(s) => {
-            let gatekeeper = ApiKeys {};
-            let header = &s[0];
-            let key = match String::from_utf8(header.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
-                    res.set(StatusCode::BadRequest);
-                    return res.send("\"api key failure\"");
-                }
-            };
-            let apikeys = gatekeeper.check_keys(&key);
-            match apikeys {
-                Some(v) => {
-                    // Set it for other users lower down in the middleware stack.
-                    _req.origin
-                        .headers
-                        .set_raw("X-TENANT-ID", vec![v.to_string().into_bytes()]);
-                }
-                None => {
-                    res.set(StatusCode::Forbidden);
+    let api = Router::new()
+        .route("/event", post(post_event).get(get_event))
+        .route("/measure", post(post_measure).get(get_measure))
+        .layer(middleware::from_fn(check_api_keys));
 
-                    return res.send("\"api key failure\"");
-                }
-            }
-        }
-        None => {
-            res.set(StatusCode::Forbidden);
+    let app = Router::new()
+        .route("/", get(root))
+        .route("/healthz", get(healthz))
+        .nest("/api/v1", api)
+        .layer(TraceLayer::new_for_http());
 
-            return res.send("\"api key failure\"");
-        }
-    }
-
-    // Pass control to the next middleware
-    res.next_middleware()
-}
-
-#[allow(clippy::result_large_err)]
-fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<'mw> {
-    let path = _req.path_without_query().unwrap_or("<no path>");
-    match _req.origin.headers.get_raw("X-PMETRICS-API-KEY") {
-        Some(key) => {
-            let header = &key[0];
-            let key = match String::from_utf8(header.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
-                    // Don't fail the request, just log the error and move on.
-                    "<unparseable>".to_string()
-                }
-            };
-            tracing::info!(
-                "module=web method={} url={} apikey={}",
-                &_req.origin.method.to_string(),
-                path,
-                &key,
-            );
-        }
-        None => {
-            tracing::info!(
-                "module=web method={} url={}",
-                &_req.origin.method.to_string(),
-                path,
-            );
-        }
-    }
-    res.next_middleware()
-}
-
-fn launch_server(server_options: &ServerOptions) {
-    tracing::info!("message='server initializing'");
-    let mut server = Nickel::new();
-
-    server.get(
-        "/healthz",
-        middleware! { |req|
-                                              healthz(req)
-        },
-    );
-
-    server.utilize(check_api_keys);
-
-    server.get(
-        "/",
-        middleware! { |req|
-                                      handler(req)
-        },
-    );
-
-    server.utilize(log_request);
-
-    server.post(
-        "/api/v1/event",
-        middleware! { |req|
-            postevent(req)
-        },
-    );
-    server.get(
-        "/api/v1/event",
-        middleware! { |req|
-            getevent(req)
-        },
-    );
-
-    server.post(
-        "/api/v1/measure",
-        middleware! { |req|
-            postmeasure(req)
-        },
-    );
-
-    server.get(
-        "/api/v1/measure",
-        middleware! { |req|
-            getmeasure(req)
-        },
-    );
-
-    tracing::info!("server starting on port {}", server_options.port);
-
-    server
-        .listen(format!("0.0.0.0:{}", server_options.port))
-        .expect("could not start server");
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], server_options.port).into();
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
+    tracing::info!(%addr, "listening");
+    axum::serve(listener, app).await.expect("serve");
 }
 
 fn launch_query(qo: &QueryOptions) {
@@ -570,8 +354,7 @@ fn launch_writer(filename: String, apikey: String) {
         }
     };
 
-    let gatekeeper = ApiKeys {};
-    let tid: i32 = match gatekeeper.check_keys(&apikey) {
+    let tid: i32 = match lookup_tenant_by_key(&apikey) {
         Some(i) => i,
         None => {
             tracing::info!("api key failure {}", &apikey);
@@ -732,7 +515,8 @@ fn clapparser() -> (Command, u8) {
     (cmd, cli.v)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let (cmd, verbosity) = clapparser();
 
     let level = match verbosity {
@@ -749,9 +533,7 @@ fn main() {
         .init();
 
     match cmd {
-        Command::Server(server_options, servertype) => match servertype {
-            ServerType::Http => launch_server(&server_options),
-        },
+        Command::Server(server_options, _st) => launch_server(&server_options).await,
         Command::PipeReader(clioptions) => launch_writer(clioptions.filename, clioptions.apikey),
         Command::Querier(qo) => launch_query(&qo),
     }

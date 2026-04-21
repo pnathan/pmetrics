@@ -15,7 +15,10 @@ debug = true
 clap = { version = "4", features = ["derive"] }
 either = "1"
 itertools = "0.11.0"
-nickel = "0.11"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace"] }
 percent-encoding-rfc3986 = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 postgres = { version = "0.19.10", features = [
