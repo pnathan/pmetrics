@@ -1,9 +1,8 @@
-extern crate postgres;
+use deadpool_postgres::{Config, Pool, Runtime};
 use percent_encoding_rfc3986::{utf8_percent_encode, NON_ALPHANUMERIC};
-use postgres::{Client, NoTls};
 use std::collections::HashMap;
 use std::env;
-
+use tokio_postgres::NoTls;
 
 trait PgConn {
     fn from_env() -> Self
@@ -101,8 +100,6 @@ impl PgConn for PostgresClientArgs {
             None => "localhost",
         };
 
-        eprintln!("{pguser} {pghost} {pgport} {pgdb}");
-
         PostgresClientArgs {
             user: pguser.to_string(),
             password: pgpass.to_string(),
@@ -123,7 +120,6 @@ impl PgConn for PostgresClientArgs {
     }
 }
 
-// hacky facade for different env var combos.
 fn get_connection_string() -> String {
     let envmap: HashMap<String, String> = env::vars().collect();
     if envmap.contains_key("INSTANCE_UNIX_SOCKET") {
@@ -133,12 +129,10 @@ fn get_connection_string() -> String {
     }
 }
 
-pub fn connect_to_db() -> postgres::Client {
-    let cs = get_connection_string();
-
-    let conn = Client::connect(cs.as_str(), NoTls).expect("could not connect to database");
-
-    tracing::info!("started pg conn");
-
-    conn
+pub fn build_pool() -> Pool {
+    let mut cfg = Config::new();
+    cfg.url = Some(get_connection_string());
+    cfg.pool = Some(deadpool_postgres::PoolConfig::new(16));
+    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+        .expect("create pg pool")
 }

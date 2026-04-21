@@ -2,7 +2,7 @@
 pmetrics entry point
  **/
 use axum::{
-    extract::Extension,
+    extract::{Extension, State},
     http::StatusCode,
     middleware::{self, Next},
     response::Response,
@@ -13,7 +13,6 @@ use clap::{Parser, Subcommand};
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::{thread, time};
 use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
@@ -65,6 +64,11 @@ struct Event {
 #[derive(Clone, Copy)]
 struct TenantId(i32);
 
+#[derive(Clone)]
+struct AppState {
+    pool: deadpool_postgres::Pool,
+}
+
 // TODO: Api should have an accept: application/json request type, along with appropriate error codes.
 // Said error codes will be:
 //
@@ -81,119 +85,140 @@ struct TenantId(i32);
 
 // TODO: Write a Search api.
 
-fn writemeasure(
-    conn: &mut postgres::Client,
+async fn writemeasure(
+    client: &deadpool_postgres::Client,
     tid: i32,
     l: &MeasureIngest,
-) -> Result<u64, postgres::Error> {
-    conn.execute("INSERT INTO monitoring.measure (name, tenant_id, measurement, dict) VALUES ($1, $2, $3, $4)",
-                 &[&l.name, &tid, &l.measurement, &l.dict])
+) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO monitoring.measure (name, tenant_id, measurement, dict) \
+             VALUES ($1, $2, $3, $4)",
+            &[&l.name, &tid, &l.measurement, &l.dict],
+        )
+        .await
 }
 
 async fn post_measure(
+    State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
     Json(body): Json<MeasureIngest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    tokio::task::spawn_blocking(move || {
-        let mut conn = db::connect_to_db();
-        writemeasure(&mut conn, tid, &body)
-    })
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
-    .map(|_| StatusCode::OK)
-    .map_err(|e| {
-        tracing::error!(?e, "db insert measure");
-        (StatusCode::BAD_GATEWAY, "server error")
-    })
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    writemeasure(&client, tid, &body)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|e| {
+            tracing::error!(?e, "db insert measure");
+            (StatusCode::BAD_GATEWAY, "server error")
+        })
 }
 
 async fn get_measure(
+    State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
 ) -> Result<Json<Vec<Measure>>, (StatusCode, &'static str)> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<Measure>, postgres::Error> {
-        let mut conn = db::connect_to_db();
-        let rows = conn.query(
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    client
+        .query(
             "SELECT insertion_time, name, measurement, dict from monitoring.measure \
              where tenant_id = $1 order by insertion_time desc limit 100",
             &[&tid],
-        )?;
-        Ok(rows
-            .iter()
-            .map(|row| Measure {
-                insertion_time: row.get(0),
-                d: MeasureIngest {
-                    name: row.get(1),
-                    measurement: row.get(2),
-                    dict: row.get(3),
-                },
-            })
-            .collect())
-    })
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
-    .map(Json)
-    .map_err(|e| {
-        tracing::error!(?e, "db query measures");
-        (StatusCode::INTERNAL_SERVER_ERROR, "server error")
-    })
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db query measures");
+            (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })
+        .map(|rows| {
+            Json(
+                rows.iter()
+                    .map(|row| Measure {
+                        insertion_time: row.get(0),
+                        d: MeasureIngest {
+                            name: row.get(1),
+                            measurement: row.get(2),
+                            dict: row.get(3),
+                        },
+                    })
+                    .collect(),
+            )
+        })
 }
 
-fn writeevent(
-    conn: &mut postgres::Client,
+async fn writeevent(
+    client: &deadpool_postgres::Client,
     tid: i32,
     l: &EventIngest,
-) -> Result<u64, postgres::Error> {
-    conn.execute(
-        "INSERT INTO monitoring.event (name, tenant_id, dict) VALUES ($1, $2, $3)",
-        &[&l.name, &tid, &l.dict],
-    )
+) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO monitoring.event (name, tenant_id, dict) VALUES ($1, $2, $3)",
+            &[&l.name, &tid, &l.dict],
+        )
+        .await
 }
 
 async fn post_event(
+    State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
     Json(body): Json<EventIngest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    tokio::task::spawn_blocking(move || {
-        let mut conn = db::connect_to_db();
-        writeevent(&mut conn, tid, &body)
-    })
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
-    .map(|_| StatusCode::OK)
-    .map_err(|e| {
-        tracing::error!(?e, "db insert event");
-        (StatusCode::BAD_GATEWAY, "server error")
-    })
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    writeevent(&client, tid, &body)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|e| {
+            tracing::error!(?e, "db insert event");
+            (StatusCode::BAD_GATEWAY, "server error")
+        })
 }
 
 async fn get_event(
+    State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
 ) -> Result<Json<Vec<Event>>, (StatusCode, &'static str)> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<Event>, postgres::Error> {
-        let mut conn = db::connect_to_db();
-        let rows = conn.query(
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    client
+        .query(
             "SELECT insertion_time, name, dict from monitoring.event \
              where tenant_id = $1 order by insertion_time desc limit 100",
             &[&tid],
-        )?;
-        Ok(rows
-            .iter()
-            .map(|row| Event {
-                insertion_time: row.get(0),
-                d: EventIngest {
-                    name: row.get(1),
-                    dict: row.get(2),
-                },
-            })
-            .collect())
-    })
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
-    .map(Json)
-    .map_err(|e| {
-        tracing::error!(?e, "db query events");
-        (StatusCode::INTERNAL_SERVER_ERROR, "server error")
-    })
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db query events");
+            (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })
+        .map(|rows| {
+            Json(
+                rows.iter()
+                    .map(|row| Event {
+                        insertion_time: row.get(0),
+                        d: EventIngest {
+                            name: row.get(1),
+                            dict: row.get(2),
+                        },
+                    })
+                    .collect(),
+            )
+        })
 }
 
 async fn root() -> &'static str {
@@ -208,19 +233,8 @@ async fn healthz() -> &'static str {
 //////////////////////////////
 // API KEY / tenant middleware.
 
-fn lookup_tenant_by_key(k: &str) -> Option<i32> {
-    let mut conn = db::connect_to_db();
-    let query = "SELECT uid from monitoring.tenant where apikey = $1";
-    match conn.query(query, &[&k.to_string()]) {
-        Ok(rows) => rows.first().map(|row| row.get(0)),
-        Err(e) => {
-            tracing::error!("error=true module=db error={e:?} query={query}");
-            None
-        }
-    }
-}
-
 async fn check_api_keys(
+    State(state): State<AppState>,
     mut req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -231,11 +245,25 @@ async fn check_api_keys(
         .ok_or(StatusCode::FORBIDDEN)?
         .to_string();
 
-    let tid = tokio::task::spawn_blocking(move || lookup_tenant_by_key(&key))
+    let client = state
+        .pool
+        .get()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let row = client
+        .query_opt(
+            "SELECT uid FROM monitoring.tenant WHERE apikey = $1",
+            &[&key],
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db auth lookup");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::FORBIDDEN)?;
 
+    let tid: i32 = row.get(0);
     req.extensions_mut().insert(TenantId(tid));
     Ok(next.run(req).await)
 }
@@ -243,16 +271,21 @@ async fn check_api_keys(
 async fn launch_server(server_options: &ServerOptions) {
     tracing::info!("server initializing");
 
+    let state = AppState {
+        pool: db::build_pool(),
+    };
+
     let api = Router::new()
         .route("/event", post(post_event).get(get_event))
         .route("/measure", post(post_measure).get(get_measure))
-        .layer(middleware::from_fn(check_api_keys));
+        .layer(middleware::from_fn_with_state(state.clone(), check_api_keys));
 
     let app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .nest("/api/v1", api)
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], server_options.port).into();
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
@@ -260,68 +293,63 @@ async fn launch_server(server_options: &ServerOptions) {
     axum::serve(listener, app).await.expect("serve");
 }
 
-fn launch_query(qo: &QueryOptions) {
-    let mut conn = db::connect_to_db();
+async fn launch_query(qo: &QueryOptions) {
+    let pool = db::build_pool();
+    let client = pool.get().await.expect("pool get for query");
     println!("{qo:?}");
-    // pg / rust-postgres demand i64 as the type to be passed in.
     let last: i64 = qo.last.into();
     let printable = match qo.metric_type {
         MetricTypeOption::E => {
-            let mut vec: Vec<IntrusiveEvent> = Vec::new();
-            let query = "SELECT insertion_time, name, dict from monitoring.event
-order by insertion_time desc
-limit $1";
-            let result = match conn.query(query, &[&last]) {
+            let query = "SELECT insertion_time, name, dict from monitoring.event \
+                         order by insertion_time desc limit $1";
+            match client.query(query, &[&last]).await {
                 Ok(rows) => {
-                    for row in &rows {
-                        vec.push(IntrusiveEvent {
+                    let vec: Vec<IntrusiveEvent> = rows
+                        .iter()
+                        .map(|row| IntrusiveEvent {
                             insertion_time: row.get(0),
                             name: row.get(1),
                             dict: row.get(2),
-                        });
+                        })
+                        .collect();
+                    match serde_json::to_string_pretty(&vec) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("error=true module=web error={e:?} class=json-render");
+                            return;
+                        }
                     }
-                    serde_json::to_string_pretty(&vec)
                 }
                 Err(e) => {
                     tracing::error!("error=true module=db error={e:?} query={query}");
-                    return;
-                }
-            };
-            match result {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     return;
                 }
             }
         }
         MetricTypeOption::M => {
-            let mut vec: Vec<IntrusiveMeasure> = Vec::new();
-            let query = "SELECT insertion_time, name, measurement, dict
-from monitoring.measure
-order by insertion_time desc
-limit $1";
-            let result = match conn.query(query, &[&last]) {
+            let query = "SELECT insertion_time, name, measurement, dict \
+                         from monitoring.measure order by insertion_time desc limit $1";
+            match client.query(query, &[&last]).await {
                 Ok(rows) => {
-                    for row in &rows {
-                        vec.push(IntrusiveMeasure {
+                    let vec: Vec<IntrusiveMeasure> = rows
+                        .iter()
+                        .map(|row| IntrusiveMeasure {
                             insertion_time: row.get(0),
                             name: row.get(1),
                             measurement: row.get(2),
                             dict: row.get(3),
-                        });
+                        })
+                        .collect();
+                    match serde_json::to_string_pretty(&vec) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("error=true module=web error={e:?} class=json-render");
+                            return;
+                        }
                     }
-                    serde_json::to_string_pretty(&vec)
                 }
                 Err(e) => {
                     tracing::error!("error=true module=db error={e:?} query={query}");
-                    return;
-                }
-            };
-            match result {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     return;
                 }
             }
@@ -337,8 +365,9 @@ enum PipeReader {
     E(EventIngest),
 }
 
-fn launch_writer(filename: String, apikey: String) {
-    let mut conn = db::connect_to_db();
+async fn launch_writer(filename: String, apikey: String) {
+    let pool = db::build_pool();
+    let client = pool.get().await.expect("pool get for writer");
 
     let mut file: Box<dyn Read> = match filename.as_str() {
         "-" => Box::new(io::stdin()),
@@ -354,13 +383,18 @@ fn launch_writer(filename: String, apikey: String) {
         }
     };
 
-    let tid: i32 = match lookup_tenant_by_key(&apikey) {
-        Some(i) => i,
-        None => {
+    let tid: i32 = client
+        .query_opt(
+            "SELECT uid FROM monitoring.tenant WHERE apikey = $1",
+            &[&apikey],
+        )
+        .await
+        .expect("api key lookup")
+        .map(|row| row.get(0))
+        .unwrap_or_else(|| {
             tracing::info!("api key failure {}", &apikey);
             panic!("api key didn't work");
-        }
-    };
+        });
 
     loop {
         let mut buffer = String::new();
@@ -381,12 +415,12 @@ fn launch_writer(filename: String, apikey: String) {
                             for row in &dataz {
                                 match row {
                                     PipeReader::M(measure) => {
-                                        if let Err(e) = writemeasure(&mut conn, tid, measure) {
+                                        if let Err(e) = writemeasure(&client, tid, measure).await {
                                             tracing::error!("error=true module=db error={e:?} class=measure-write");
                                         }
                                     }
                                     PipeReader::E(event) => {
-                                        if let Err(e) = writeevent(&mut conn, tid, event) {
+                                        if let Err(e) = writeevent(&client, tid, event).await {
                                             tracing::error!("error=true module=db error={e:?} class=event-write");
                                         }
                                     }
@@ -405,9 +439,7 @@ fn launch_writer(filename: String, apikey: String) {
             }
         }
 
-        // One second pulled out of thin air.
-        let one = time::Duration::from_secs(1);
-        thread::sleep(one);
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -534,7 +566,9 @@ async fn main() {
 
     match cmd {
         Command::Server(server_options, _st) => launch_server(&server_options).await,
-        Command::PipeReader(clioptions) => launch_writer(clioptions.filename, clioptions.apikey),
-        Command::Querier(qo) => launch_query(&qo),
+        Command::PipeReader(clioptions) => {
+            launch_writer(clioptions.filename, clioptions.apikey).await
+        }
+        Command::Querier(qo) => launch_query(&qo).await,
     }
 }
