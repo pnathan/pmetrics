@@ -2,14 +2,15 @@
 pmetrics entry point
  **/
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use rand::distributions::{Alphanumeric, DistString};
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -17,8 +18,8 @@ use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
 
-use serde::{Deserialize, Serialize};
 use pmetrics::db;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -65,8 +66,27 @@ struct Event {
 struct TenantId(i32);
 
 #[derive(Clone)]
+struct ApiPermissions(Vec<String>);
+
+#[derive(Clone)]
 struct AppState {
     pool: deadpool_postgres::Pool,
+}
+
+// API key management types
+#[derive(Debug, Deserialize)]
+struct CreateKeyRequest {
+    label: String,
+    permissions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiKeyRecord {
+    id: i32,
+    label: String,
+    permissions: Vec<String>,
+    created_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
 }
 
 // TODO: Api should have an accept: application/json request type, along with appropriate error codes.
@@ -102,8 +122,12 @@ async fn writemeasure(
 async fn post_measure(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
     Json(body): Json<MeasureIngest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "tenant_write") {
+        return Err((StatusCode::FORBIDDEN, "missing tenant_write permission"));
+    }
     let client = state
         .pool
         .get()
@@ -121,7 +145,11 @@ async fn post_measure(
 async fn get_measure(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
 ) -> Result<Json<Vec<Measure>>, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "tenant_read") {
+        return Err((StatusCode::FORBIDDEN, "missing tenant_read permission"));
+    }
     let client = state
         .pool
         .get()
@@ -170,8 +198,12 @@ async fn writeevent(
 async fn post_event(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
     Json(body): Json<EventIngest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "tenant_write") {
+        return Err((StatusCode::FORBIDDEN, "missing tenant_write permission"));
+    }
     let client = state
         .pool
         .get()
@@ -189,7 +221,11 @@ async fn post_event(
 async fn get_event(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
 ) -> Result<Json<Vec<Event>>, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "tenant_read") {
+        return Err((StatusCode::FORBIDDEN, "missing tenant_read permission"));
+    }
     let client = state
         .pool
         .get()
@@ -231,6 +267,117 @@ async fn healthz() -> &'static str {
 }
 
 //////////////////////////////
+// Key management handlers
+
+async fn list_keys(
+    State(state): State<AppState>,
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
+) -> Result<Json<Vec<ApiKeyRecord>>, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "make_api_key") {
+        return Err((StatusCode::FORBIDDEN, "missing make_api_key permission"));
+    }
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    client
+        .query(
+            "SELECT id, label, permissions, created_at, revoked_at \
+             FROM monitoring.api_key WHERE tenant_id = $1 ORDER BY created_at DESC",
+            &[&tid],
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db list keys");
+            (StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })
+        .map(|rows| {
+            Json(
+                rows.iter()
+                    .map(|row| ApiKeyRecord {
+                        id: row.get(0),
+                        label: row.get(1),
+                        permissions: row.get(2),
+                        created_at: row.get(3),
+                        revoked_at: row.get(4),
+                    })
+                    .collect(),
+            )
+        })
+}
+
+#[derive(Serialize)]
+struct CreatedKey {
+    key: String,
+}
+
+async fn create_key(
+    State(state): State<AppState>,
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
+    Json(body): Json<CreateKeyRequest>,
+) -> Result<Json<CreatedKey>, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "make_api_key") {
+        return Err((StatusCode::FORBIDDEN, "missing make_api_key permission"));
+    }
+    let new_key = format!(
+        "a-{}",
+        Alphanumeric.sample_string(&mut rand::thread_rng(), 16)
+    );
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    client
+        .execute(
+            "INSERT INTO monitoring.api_key (tenant_id, key, label, permissions) \
+             VALUES ($1, $2, $3, $4)",
+            &[&tid, &new_key, &body.label, &body.permissions],
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db create key");
+            (StatusCode::BAD_GATEWAY, "server error")
+        })?;
+    Ok(Json(CreatedKey { key: new_key }))
+}
+
+async fn revoke_key(
+    State(state): State<AppState>,
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Extension(ApiPermissions(perms)): Extension<ApiPermissions>,
+    Path(key_id): Path<i32>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    if !perms.iter().any(|p| p == "disable_api_key") {
+        return Err((StatusCode::FORBIDDEN, "missing disable_api_key permission"));
+    }
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    let n = client
+        .execute(
+            "UPDATE monitoring.api_key SET revoked_at = now() \
+             WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+            &[&key_id, &tid],
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, "db revoke key");
+            (StatusCode::BAD_GATEWAY, "server error")
+        })?;
+    if n == 0 {
+        Err((StatusCode::NOT_FOUND, "key not found"))
+    } else {
+        Ok(StatusCode::OK)
+    }
+}
+
+//////////////////////////////
 // API KEY / tenant middleware.
 
 async fn check_api_keys(
@@ -253,7 +400,8 @@ async fn check_api_keys(
 
     let row = client
         .query_opt(
-            "SELECT uid FROM monitoring.tenant WHERE apikey = $1",
+            "SELECT tenant_id, permissions FROM monitoring.api_key \
+             WHERE key = $1 AND revoked_at IS NULL",
             &[&key],
         )
         .await
@@ -264,7 +412,9 @@ async fn check_api_keys(
         .ok_or(StatusCode::FORBIDDEN)?;
 
     let tid: i32 = row.get(0);
+    let perms: Vec<String> = row.get(1);
     req.extensions_mut().insert(TenantId(tid));
+    req.extensions_mut().insert(ApiPermissions(perms));
     Ok(next.run(req).await)
 }
 
@@ -278,7 +428,12 @@ async fn launch_server(server_options: &ServerOptions) {
     let api = Router::new()
         .route("/event", post(post_event).get(get_event))
         .route("/measure", post(post_measure).get(get_measure))
-        .layer(middleware::from_fn_with_state(state.clone(), check_api_keys));
+        .route("/keys", get(list_keys).post(create_key))
+        .route("/keys/:id", delete(revoke_key))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_api_keys,
+        ));
 
     let app = Router::new()
         .route("/", get(root))
@@ -385,7 +540,7 @@ async fn launch_writer(filename: String, apikey: String) {
 
     let tid: i32 = client
         .query_opt(
-            "SELECT uid FROM monitoring.tenant WHERE apikey = $1",
+            "SELECT tenant_id FROM monitoring.api_key WHERE key = $1 AND revoked_at IS NULL",
             &[&apikey],
         )
         .await
