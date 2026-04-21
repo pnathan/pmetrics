@@ -10,9 +10,11 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::fs::File;
 use std::io;
 use std::io::Read;
+use std::time::Instant;
 use tower_http::trace::TraceLayer;
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
@@ -72,6 +74,7 @@ struct TenantId(i32);
 #[derive(Clone)]
 struct AppState {
     pool: deadpool_postgres::Pool,
+    prometheus: PrometheusHandle,
 }
 
 // TODO: Api should have an accept: application/json request type, along with appropriate error codes.
@@ -287,6 +290,40 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn prometheus_metrics(State(state): State<AppState>) -> String {
+    state.prometheus.render()
+}
+
+async fn metrics_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let path = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|mp| mp.as_str().to_owned())
+        .unwrap_or_else(|| req.uri().path().to_owned());
+    if path == "/metrics" {
+        return next.run(req).await;
+    }
+    let method = req.method().to_string();
+    let start = Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::counter!(
+        "pmetrics_requests_total",
+        "method" => method.clone(),
+        "path" => path.clone(),
+        "status" => status
+    )
+    .increment(1);
+    metrics::histogram!(
+        "pmetrics_request_duration_seconds",
+        "method" => method,
+        "path" => path
+    )
+    .record(elapsed);
+    resp
+}
+
 //////////////////////////////
 // API KEY / tenant middleware.
 
@@ -365,8 +402,10 @@ fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(prometheus_metrics))
         .nest("/api/v1", api)
         .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .layer(middleware::from_fn(metrics_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -374,8 +413,15 @@ fn build_app(state: AppState) -> Router {
 async fn launch_server(server_options: &ServerOptions) {
     tracing::info!("server initializing");
 
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let prometheus = recorder.handle();
+    if let Err(e) = metrics::set_global_recorder(recorder) {
+        tracing::warn!("metrics recorder already set: {e}");
+    }
+
     let state = AppState {
         pool: db::build_pool(),
+        prometheus,
     };
 
     let app = build_app(state);
@@ -727,6 +773,12 @@ mod tests {
         db::build_pool()
     }
 
+    fn test_state() -> AppState {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let prometheus = recorder.handle();
+        AppState { pool: test_pool(), prometheus }
+    }
+
     async fn seed_tenant(client: &deadpool_postgres::Client) -> (i32, String) {
         let key = format!("test-{}", uuid::Uuid::new_v4());
         client
@@ -766,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_ok() {
-        let state = AppState { pool: test_pool() };
+        let state = test_state();
         let app = build_app(state);
         let resp = app
             .oneshot(
@@ -784,7 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_event_without_key_returns_403() {
-        let state = AppState { pool: test_pool() };
+        let state = test_state();
         let app = build_app(state);
         let resp = app
             .oneshot(
@@ -802,7 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_api_key_returns_403() {
-        let state = AppState { pool: test_pool() };
+        let state = test_state();
         let app = build_app(state);
         let resp = app
             .oneshot(
@@ -824,7 +876,7 @@ mod tests {
         let client = pool.get().await.expect("pool");
         let (tid, key) = seed_tenant(&client).await;
 
-        let state = AppState { pool: test_pool() };
+        let state = test_state();
         let app = build_app(state);
 
         let post_resp = app
@@ -867,7 +919,7 @@ mod tests {
         let client = pool.get().await.expect("pool");
         let (tid, key) = seed_tenant(&client).await;
 
-        let state = AppState { pool: test_pool() };
+        let state = test_state();
         let app = build_app(state);
 
         let post_resp = app
