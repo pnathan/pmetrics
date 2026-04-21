@@ -17,8 +17,8 @@ use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
 
-use serde::{Deserialize, Serialize};
 use pmetrics::db;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -268,6 +268,23 @@ async fn check_api_keys(
     Ok(next.run(req).await)
 }
 
+fn build_app(state: AppState) -> Router {
+    let api = Router::new()
+        .route("/event", post(post_event).get(get_event))
+        .route("/measure", post(post_measure).get(get_measure))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_api_keys,
+        ));
+
+    Router::new()
+        .route("/", get(root))
+        .route("/healthz", get(healthz))
+        .nest("/api/v1", api)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
 async fn launch_server(server_options: &ServerOptions) {
     tracing::info!("server initializing");
 
@@ -275,17 +292,7 @@ async fn launch_server(server_options: &ServerOptions) {
         pool: db::build_pool(),
     };
 
-    let api = Router::new()
-        .route("/event", post(post_event).get(get_event))
-        .route("/measure", post(post_measure).get(get_measure))
-        .layer(middleware::from_fn_with_state(state.clone(), check_api_keys));
-
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/healthz", get(healthz))
-        .nest("/api/v1", api)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = build_app(state);
 
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], server_options.port).into();
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
@@ -570,5 +577,197 @@ async fn main() {
             launch_writer(clioptions.filename, clioptions.apikey).await
         }
         Command::Querier(qo) => launch_query(&qo).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_pool() -> deadpool_postgres::Pool {
+        db::build_pool()
+    }
+
+    async fn seed_tenant(client: &deadpool_postgres::Client) -> (i32, String) {
+        let key = format!("test-{}", uuid::Uuid::new_v4());
+        client
+            .execute(
+                "INSERT INTO monitoring.tenant (tenantname, apikey) VALUES ('integration-test', $1)",
+                &[&key],
+            )
+            .await
+            .expect("seed tenant");
+        let row = client
+            .query_one(
+                "SELECT uid FROM monitoring.tenant WHERE apikey = $1",
+                &[&key],
+            )
+            .await
+            .expect("get seeded tenant");
+        (row.get(0), key)
+    }
+
+    async fn cleanup_tenant(client: &deadpool_postgres::Client, tid: i32) {
+        client
+            .execute(
+                "DELETE FROM monitoring.measure WHERE tenant_id = $1",
+                &[&tid],
+            )
+            .await
+            .ok();
+        client
+            .execute("DELETE FROM monitoring.event WHERE tenant_id = $1", &[&tid])
+            .await
+            .ok();
+        client
+            .execute("DELETE FROM monitoring.tenant WHERE uid = $1", &[&tid])
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let state = AppState { pool: test_pool() };
+        let app = build_app(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn post_event_without_key_returns_403() {
+        let state = AppState { pool: test_pool() };
+        let app = build_app(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/event")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"test","dict":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invalid_api_key_returns_403() {
+        let state = AppState { pool: test_pool() };
+        let app = build_app(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/event")
+                    .header("X-PMETRICS-API-KEY", "not-a-real-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn post_and_get_event_roundtrip() {
+        let pool = test_pool();
+        let client = pool.get().await.expect("pool");
+        let (tid, key) = seed_tenant(&client).await;
+
+        let state = AppState { pool: test_pool() };
+        let app = build_app(state);
+
+        let post_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/event")
+                    .header("content-type", "application/json")
+                    .header("X-PMETRICS-API-KEY", &key)
+                    .body(Body::from(r#"{"name":"roundtrip-event","dict":{"k":"v"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post_resp.status(), StatusCode::OK);
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/event")
+                    .header("X-PMETRICS-API-KEY", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("roundtrip-event"));
+
+        cleanup_tenant(&client, tid).await;
+    }
+
+    #[tokio::test]
+    async fn post_and_get_measure_roundtrip() {
+        let pool = test_pool();
+        let client = pool.get().await.expect("pool");
+        let (tid, key) = seed_tenant(&client).await;
+
+        let state = AppState { pool: test_pool() };
+        let app = build_app(state);
+
+        let post_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/measure")
+                    .header("content-type", "application/json")
+                    .header("X-PMETRICS-API-KEY", &key)
+                    .body(Body::from(
+                        r#"{"name":"roundtrip-measure","measurement":42.5,"dict":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post_resp.status(), StatusCode::OK);
+
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/measure")
+                    .header("X-PMETRICS-API-KEY", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("roundtrip-measure"));
+
+        cleanup_tenant(&client, tid).await;
     }
 }
