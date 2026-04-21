@@ -374,23 +374,47 @@ async fn post_ingest(
     Extension(TenantId(tid)): Extension<TenantId>,
     Json(items): Json<Vec<PipeReader>>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    let client = state
+    if items.is_empty() {
+        return Ok(StatusCode::OK);
+    }
+    let mut client = state
         .pool
         .get()
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
-    for item in &items {
+    let txn = client.transaction().await.map_err(|e| {
+        tracing::error!(?e, "db begin transaction");
+        (StatusCode::BAD_GATEWAY, "server error")
+    })?;
+    for (idx, item) in items.iter().enumerate() {
         match item {
-            PipeReader::M(m) => writemeasure(&client, tid, m).await.map_err(|e| {
-                tracing::error!(?e, "bulk insert measure");
-                (StatusCode::BAD_GATEWAY, "db error")
-            })?,
-            PipeReader::E(e) => writeevent(&client, tid, e).await.map_err(|e| {
-                tracing::error!(?e, "bulk insert event");
-                (StatusCode::BAD_GATEWAY, "db error")
-            })?,
+            PipeReader::M(m) => txn
+                .execute(
+                    "INSERT INTO monitoring.measure (name, tenant_id, measurement, dict) \
+                     VALUES ($1, $2, $3, $4)",
+                    &[&m.name, &tid, &m.measurement, &m.dict],
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(?e, idx, "bulk insert measure");
+                    (StatusCode::BAD_GATEWAY, "db error")
+                })?,
+            PipeReader::E(ev) => txn
+                .execute(
+                    "INSERT INTO monitoring.event (name, tenant_id, dict) VALUES ($1, $2, $3)",
+                    &[&ev.name, &tid, &ev.dict],
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(?e, idx, "bulk insert event");
+                    (StatusCode::BAD_GATEWAY, "db error")
+                })?,
         };
     }
+    txn.commit().await.map_err(|e| {
+        tracing::error!(?e, "db commit transaction");
+        (StatusCode::BAD_GATEWAY, "server error")
+    })?;
     Ok(StatusCode::OK)
 }
 
