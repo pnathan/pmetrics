@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE monitoring.api_key (
     id          serial primary key,
     tenant_id   int not null references monitoring.tenant(uid) on delete cascade,
@@ -18,3 +20,5 @@ FROM monitoring.tenant;
 
 ALTER TABLE monitoring.tenant DROP COLUMN apikey;
 DROP INDEX IF EXISTS only_one_no_dupes;
+
+COMMIT;

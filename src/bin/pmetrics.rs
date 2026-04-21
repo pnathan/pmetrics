@@ -313,6 +313,13 @@ struct CreatedKey {
     key: String,
 }
 
+const VALID_PERMISSIONS: &[&str] = &[
+    "tenant_read",
+    "tenant_write",
+    "make_api_key",
+    "disable_api_key",
+];
+
 async fn create_key(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
@@ -321,6 +328,11 @@ async fn create_key(
 ) -> Result<Json<CreatedKey>, (StatusCode, &'static str)> {
     if !perms.iter().any(|p| p == "make_api_key") {
         return Err((StatusCode::FORBIDDEN, "missing make_api_key permission"));
+    }
+    for p in &body.permissions {
+        if !VALID_PERMISSIONS.contains(&p.as_str()) {
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, "unknown permission value"));
+        }
     }
     let new_key = format!(
         "a-{}",
@@ -538,18 +550,24 @@ async fn launch_writer(filename: String, apikey: String) {
         }
     };
 
-    let tid: i32 = client
+    let row = client
         .query_opt(
-            "SELECT tenant_id FROM monitoring.api_key WHERE key = $1 AND revoked_at IS NULL",
+            "SELECT tenant_id, permissions FROM monitoring.api_key \
+             WHERE key = $1 AND revoked_at IS NULL",
             &[&apikey],
         )
         .await
         .expect("api key lookup")
-        .map(|row| row.get(0))
         .unwrap_or_else(|| {
             tracing::info!("api key failure {}", &apikey);
             panic!("api key didn't work");
         });
+    let tid: i32 = row.get(0);
+    let perms: Vec<String> = row.get(1);
+    if !perms.iter().any(|p| p == "tenant_write") {
+        tracing::error!("api key {} lacks tenant_write permission", &apikey);
+        panic!("api key lacks tenant_write permission");
+    }
 
     loop {
         let mut buffer = String::new();
