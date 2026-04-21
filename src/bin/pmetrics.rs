@@ -10,15 +10,17 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::fs::File;
 use std::io;
 use std::io::Read;
+use std::time::Instant;
 use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
 
-use serde::{Deserialize, Serialize};
 use pmetrics::db;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -67,6 +69,7 @@ struct TenantId(i32);
 #[derive(Clone)]
 struct AppState {
     pool: deadpool_postgres::Pool,
+    prometheus: PrometheusHandle,
 }
 
 // TODO: Api should have an accept: application/json request type, along with appropriate error codes.
@@ -230,6 +233,33 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn prometheus_metrics(State(state): State<AppState>) -> String {
+    state.prometheus.render()
+}
+
+async fn metrics_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path().to_owned();
+    let method = req.method().to_string();
+    let start = Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::counter!(
+        "pmetrics_requests_total",
+        "method" => method.clone(),
+        "path" => path.clone(),
+        "status" => status
+    )
+    .increment(1);
+    metrics::histogram!(
+        "pmetrics_request_duration_seconds",
+        "method" => method,
+        "path" => path
+    )
+    .record(elapsed);
+    resp
+}
+
 //////////////////////////////
 // API KEY / tenant middleware.
 
@@ -271,19 +301,29 @@ async fn check_api_keys(
 async fn launch_server(server_options: &ServerOptions) {
     tracing::info!("server initializing");
 
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let prometheus = recorder.handle();
+    metrics::set_global_recorder(recorder).expect("set metrics recorder");
+
     let state = AppState {
         pool: db::build_pool(),
+        prometheus,
     };
 
     let api = Router::new()
         .route("/event", post(post_event).get(get_event))
         .route("/measure", post(post_measure).get(get_measure))
-        .layer(middleware::from_fn_with_state(state.clone(), check_api_keys));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_api_keys,
+        ));
 
     let app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(prometheus_metrics))
         .nest("/api/v1", api)
+        .layer(middleware::from_fn(metrics_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
