@@ -238,7 +238,14 @@ async fn prometheus_metrics(State(state): State<AppState>) -> String {
 }
 
 async fn metrics_middleware(req: axum::extract::Request, next: Next) -> Response {
-    let path = req.uri().path().to_owned();
+    let path = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|mp| mp.as_str().to_owned())
+        .unwrap_or_else(|| req.uri().path().to_owned());
+    if path == "/metrics" {
+        return next.run(req).await;
+    }
     let method = req.method().to_string();
     let start = Instant::now();
     let resp = next.run(req).await;
@@ -303,7 +310,9 @@ async fn launch_server(server_options: &ServerOptions) {
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let prometheus = recorder.handle();
-    metrics::set_global_recorder(recorder).expect("set metrics recorder");
+    if let Err(e) = metrics::set_global_recorder(recorder) {
+        tracing::warn!("metrics recorder already set: {e}");
+    }
 
     let state = AppState {
         pool: db::build_pool(),
