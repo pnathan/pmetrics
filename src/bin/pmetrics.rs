@@ -17,8 +17,8 @@ use tower_http::trace::TraceLayer;
 
 use chrono::prelude::{DateTime, Utc};
 
-use serde::{Deserialize, Serialize};
 use pmetrics::db;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -278,7 +278,11 @@ async fn launch_server(server_options: &ServerOptions) {
     let api = Router::new()
         .route("/event", post(post_event).get(get_event))
         .route("/measure", post(post_measure).get(get_measure))
-        .layer(middleware::from_fn_with_state(state.clone(), check_api_keys));
+        .route("/ingest", post(post_ingest))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            check_api_keys,
+        ));
 
     let app = Router::new()
         .route("/", get(root))
@@ -363,6 +367,31 @@ async fn launch_query(qo: &QueryOptions) {
 enum PipeReader {
     M(MeasureIngest),
     E(EventIngest),
+}
+
+async fn post_ingest(
+    State(state): State<AppState>,
+    Extension(TenantId(tid)): Extension<TenantId>,
+    Json(items): Json<Vec<PipeReader>>,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    let client = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "pool"))?;
+    for item in &items {
+        match item {
+            PipeReader::M(m) => writemeasure(&client, tid, m).await.map_err(|e| {
+                tracing::error!(?e, "bulk insert measure");
+                (StatusCode::BAD_GATEWAY, "db error")
+            })?,
+            PipeReader::E(e) => writeevent(&client, tid, e).await.map_err(|e| {
+                tracing::error!(?e, "bulk insert event");
+                (StatusCode::BAD_GATEWAY, "db error")
+            })?,
+        };
+    }
+    Ok(StatusCode::OK)
 }
 
 async fn launch_writer(filename: String, apikey: String) {
