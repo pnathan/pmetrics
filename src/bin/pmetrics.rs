@@ -14,6 +14,11 @@ use std::fs::File;
 use std::io;
 use std::io::Read;
 use tower_http::trace::TraceLayer;
+use utoipa::{
+    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+    Modify, OpenApi,
+};
+use utoipa_swagger_ui::SwaggerUi;
 
 use chrono::prelude::{DateTime, Utc};
 
@@ -21,14 +26,14 @@ use pmetrics::db;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
 struct MeasureIngest {
     name: String,
     measurement: f64,
     dict: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct IntrusiveMeasure {
     insertion_time: DateTime<Utc>,
     name: String,
@@ -36,26 +41,26 @@ struct IntrusiveMeasure {
     dict: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct Measure {
     d: MeasureIngest,
     insertion_time: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
 struct EventIngest {
     name: String,
     dict: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct IntrusiveEvent {
     insertion_time: DateTime<Utc>,
     name: String,
     dict: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 struct Event {
     d: EventIngest,
     insertion_time: DateTime<Utc>,
@@ -99,6 +104,17 @@ async fn writemeasure(
         .await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/measure",
+    request_body = MeasureIngest,
+    responses(
+        (status = 200, description = "Measurement recorded"),
+        (status = 403, description = "Forbidden"),
+        (status = 502, description = "Database error"),
+    ),
+    security(("ApiKeyAuth" = []))
+)]
 async fn post_measure(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
@@ -118,6 +134,16 @@ async fn post_measure(
         })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/measure",
+    responses(
+        (status = 200, description = "List of recent measurements", body = Vec<Measure>),
+        (status = 403, description = "Forbidden"),
+        (status = 500, description = "Server error"),
+    ),
+    security(("ApiKeyAuth" = []))
+)]
 async fn get_measure(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
@@ -167,6 +193,17 @@ async fn writeevent(
         .await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/event",
+    request_body = EventIngest,
+    responses(
+        (status = 200, description = "Event recorded"),
+        (status = 403, description = "Forbidden"),
+        (status = 502, description = "Database error"),
+    ),
+    security(("ApiKeyAuth" = []))
+)]
 async fn post_event(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
@@ -186,6 +223,16 @@ async fn post_event(
         })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/event",
+    responses(
+        (status = 200, description = "List of recent events", body = Vec<Event>),
+        (status = 403, description = "Forbidden"),
+        (status = 500, description = "Server error"),
+    ),
+    security(("ApiKeyAuth" = []))
+)]
 async fn get_event(
     State(state): State<AppState>,
     Extension(TenantId(tid)): Extension<TenantId>,
@@ -221,10 +268,20 @@ async fn get_event(
         })
 }
 
+#[utoipa::path(
+    get,
+    path = "/",
+    responses((status = 200, description = "Welcome message"))
+)]
 async fn root() -> &'static str {
     "welcome to pmetrics"
 }
 
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    responses((status = 200, description = "Service is healthy"))
+)]
 async fn healthz() -> &'static str {
     tracing::info!("healthz");
     "ok"
@@ -268,6 +325,33 @@ async fn check_api_keys(
     Ok(next.run(req).await)
 }
 
+//////////////////////////////
+// OpenAPI
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "ApiKeyAuth",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-PMETRICS-API-KEY"))),
+        );
+    }
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(root, healthz, post_event, get_event, post_measure, get_measure),
+    components(schemas(EventIngest, Event, MeasureIngest, Measure, IntrusiveEvent, IntrusiveMeasure)),
+    modifiers(&SecurityAddon),
+    info(title = "pmetrics API", version = "1.0.2", description = "Metrics and event tracking")
+)]
+struct ApiDoc;
+
+//////////////////////////////
+// Router
+
 fn build_app(state: AppState) -> Router {
     let api = Router::new()
         .route("/event", post(post_event).get(get_event))
@@ -281,6 +365,7 @@ fn build_app(state: AppState) -> Router {
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .nest("/api/v1", api)
+        .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
