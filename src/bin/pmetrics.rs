@@ -5,7 +5,6 @@ pmetrics entry point
 extern crate nickel;
 
 use clap::{Parser, Subcommand};
-use log::LevelFilter;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -87,7 +86,7 @@ where
     match req.origin.read_to_string(&mut buffer) {
         Ok(_) => {} // no-op
         Err(_) => {
-            log::info!("error=true module=web class=string_read");
+            tracing::info!("error=true module=web class=string_read");
             return (StatusCode::BadRequest, "unable to read string".to_string());
         }
     }
@@ -99,15 +98,15 @@ where
             match insert_function(&mut conn, &deserialized) {
                 Ok(_) => (StatusCode::Ok, "ok".to_string()),
                 Err(err) => {
-                    log::debug!("error=true module=web class=db_insert details={err}");
-                    log::info!("error=true module=web class=db_insert");
+                    tracing::debug!("error=true module=web class=db_insert details={err}");
+                    tracing::info!("error=true module=web class=db_insert");
                     (StatusCode::BadGateway, "server error".to_string())
                 }
             }
         }
 
         Err(_) => {
-            log::info!("error=true module=web class=deserialize/parse");
+            tracing::info!("error=true module=web class=deserialize/parse");
             (StatusCode::BadRequest, "bad parse and cast".to_string())
         }
     }
@@ -132,7 +131,7 @@ fn postmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            log::info!(
+            tracing::info!(
                 "error=true module=web what='failed to get the x tenant id from the middleware'"
             );
             (StatusCode::BadRequest, "\"key failure\"".to_string())
@@ -170,7 +169,7 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             match serde_json::to_string(&vec) {
                 Ok(s) => (StatusCode::Ok, s),
                 Err(e) => {
-                    log::error!("error=true module=web error={e:?} class=json-render");
+                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     (
                         StatusCode::InternalServerError,
                         "server error, can't render data".to_string(),
@@ -179,7 +178,7 @@ fn getmeasure(req: &mut Request) -> (nickel::status::StatusCode, String) {
             }
         }
         Err(e) => {
-            log::error!("error=true module=db error={} query={}", e, &query);
+            tracing::error!("error=true module=db error={} query={}", e, &query);
             (
                 StatusCode::InternalServerError,
                 "server error, can't get data".to_string(),
@@ -209,7 +208,7 @@ fn postevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             generic_post(req, f)
         }
         None => {
-            log::info!(
+            tracing::info!(
                 "error=true module=web what='failed to get the x tenant id from the middleware'"
             );
             (StatusCode::BadRequest, "\"key failure\"".to_string())
@@ -246,7 +245,7 @@ fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             match serde_json::to_string(&vec) {
                 Ok(s) => (StatusCode::Ok, s),
                 Err(e) => {
-                    log::error!("error=true module=web error={e:?} class=json-render");
+                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     (
                         StatusCode::InternalServerError,
                         "server error, can't render data".to_string(),
@@ -255,7 +254,7 @@ fn getevent(req: &mut Request) -> (nickel::status::StatusCode, String) {
             }
         }
         Err(e) => {
-            log::error!("error=true module=db error={e:?} query={query}");
+            tracing::error!("error=true module=db error={e:?} query={query}");
             (
                 StatusCode::InternalServerError,
                 "server error, can't get data".to_string(),
@@ -273,7 +272,7 @@ fn handler(_req: &mut Request) -> (nickel::status::StatusCode, String) {
 // healthz - am I alive?
 // does not check database liveness though.
 fn healthz(_req: &mut Request) -> (nickel::status::StatusCode, String) {
-    log::info!("healthz");
+    tracing::info!("healthz");
     (StatusCode::Ok, "ok".to_string())
 }
 
@@ -287,20 +286,20 @@ fn get_tid(req: &Request) -> Option<i32> {
             let tid_string = match String::from_utf8(thread_string) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::info!("error=true module=web what='failed to parse tenant id from utf8' error='{e:?}'");
+                    tracing::info!("error=true module=web what='failed to parse tenant id from utf8' error='{e:?}'");
                     return None;
                 }
             };
             match tid_string.parse() {
                 Ok(tid) => Some(tid),
                 Err(e) => {
-                    log::info!("error=true module=web what='failed to parse tenant id from string' error='{e:?}'");
+                    tracing::info!("error=true module=web what='failed to parse tenant id from string' error='{e:?}'");
                     None
                 }
             }
         }
         None => {
-            log::info!(
+            tracing::info!(
                 "error=true module=web what='failed to get the x tenant id from the middleware'"
             );
             None
@@ -330,7 +329,7 @@ impl ApiKeys {
                 }
             }
             Err(e) => {
-                log::error!("error=true module=db error={e:?} query={query}");
+                tracing::error!("error=true module=db error={e:?} query={query}");
                 None
             }
         }
@@ -358,7 +357,7 @@ fn check_api_keys<'mw>(_req: &mut Request, mut res: Response<'mw>) -> Middleware
             let key = match String::from_utf8(header.to_vec()) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
+                    tracing::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
                     res.set(StatusCode::BadRequest);
                     return res.send("\"api key failure\"");
                 }
@@ -398,12 +397,12 @@ fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<
             let key = match String::from_utf8(header.to_vec()) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
+                    tracing::info!("error=true module=web what='failed to parse api key from utf8' error='{e:?}'");
                     // Don't fail the request, just log the error and move on.
                     "<unparseable>".to_string()
                 }
             };
-            log::info!(
+            tracing::info!(
                 "module=web method={} url={} apikey={}",
                 &_req.origin.method.to_string(),
                 path,
@@ -411,7 +410,7 @@ fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<
             );
         }
         None => {
-            log::info!(
+            tracing::info!(
                 "module=web method={} url={}",
                 &_req.origin.method.to_string(),
                 path,
@@ -422,7 +421,7 @@ fn log_request<'mw>(_req: &mut Request, res: Response<'mw>) -> MiddlewareResult<
 }
 
 fn launch_server(server_options: &ServerOptions) {
-    log::info!("message='server initializing'");
+    tracing::info!("message='server initializing'");
     let mut server = Nickel::new();
 
     server.get(
@@ -470,7 +469,7 @@ fn launch_server(server_options: &ServerOptions) {
         },
     );
 
-    log::info!("server starting on port {}", server_options.port);
+    tracing::info!("server starting on port {}", server_options.port);
 
     server
         .listen(format!("0.0.0.0:{}", server_options.port))
@@ -500,14 +499,14 @@ limit $1";
                     serde_json::to_string_pretty(&vec)
                 }
                 Err(e) => {
-                    log::error!("error=true module=db error={e:?} query={query}");
+                    tracing::error!("error=true module=db error={e:?} query={query}");
                     return;
                 }
             };
             match result {
                 Ok(s) => s,
                 Err(e) => {
-                    log::error!("error=true module=web error={e:?} class=json-render");
+                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     return;
                 }
             }
@@ -531,14 +530,14 @@ limit $1";
                     serde_json::to_string_pretty(&vec)
                 }
                 Err(e) => {
-                    log::error!("error=true module=db error={e:?} query={query}");
+                    tracing::error!("error=true module=db error={e:?} query={query}");
                     return;
                 }
             };
             match result {
                 Ok(s) => s,
                 Err(e) => {
-                    log::error!("error=true module=web error={e:?} class=json-render");
+                    tracing::error!("error=true module=web error={e:?} class=json-render");
                     return;
                 }
             }
@@ -560,11 +559,11 @@ fn launch_writer(filename: String, apikey: String) {
     let mut file: Box<dyn Read> = match filename.as_str() {
         "-" => Box::new(io::stdin()),
         _ => {
-            log::info!("opening {}", &filename);
+            tracing::info!("opening {}", &filename);
             match File::open(filename) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    log::error!("error=true module=fs error={e:?} class=file-open");
+                    tracing::error!("error=true module=fs error={e:?} class=file-open");
                     panic!("could not open file");
                 }
             }
@@ -575,7 +574,7 @@ fn launch_writer(filename: String, apikey: String) {
     let tid: i32 = match gatekeeper.check_keys(&apikey) {
         Some(i) => i,
         None => {
-            log::info!("api key failure {}", &apikey);
+            tracing::info!("api key failure {}", &apikey);
             panic!("api key didn't work");
         }
     };
@@ -590,7 +589,7 @@ fn launch_writer(filename: String, apikey: String) {
         match result {
             Ok(bytecount) => {
                 if bytecount > 0 {
-                    log::info!("status=rx");
+                    tracing::info!("status=rx");
                     let v: Result<Vec<PipeReader>, serde_json::Error> =
                         serde_json::from_str(&buffer);
 
@@ -600,26 +599,26 @@ fn launch_writer(filename: String, apikey: String) {
                                 match row {
                                     PipeReader::M(measure) => {
                                         if let Err(e) = writemeasure(&mut conn, tid, measure) {
-                                            log::error!("error=true module=db error={e:?} class=measure-write");
+                                            tracing::error!("error=true module=db error={e:?} class=measure-write");
                                         }
                                     }
                                     PipeReader::E(event) => {
                                         if let Err(e) = writeevent(&mut conn, tid, event) {
-                                            log::error!("error=true module=db error={e:?} class=event-write");
+                                            tracing::error!("error=true module=db error={e:?} class=event-write");
                                         }
                                     }
                                 }
-                                log::info!("status=written");
+                                tracing::info!("status=written");
                             }
                         }
                         Err(e) => {
-                            log::error!("err={e:?}");
+                            tracing::error!("err={e:?}");
                         }
                     }
                 }
             }
             Err(e) => {
-                log::info!("err={e:?}");
+                tracing::info!("err={e:?}");
             }
         }
 
@@ -736,13 +735,18 @@ fn clapparser() -> (Command, u8) {
 fn main() {
     let (cmd, verbosity) = clapparser();
 
-    let log_level = match verbosity {
-        0 => LevelFilter::Error,
-        1 => LevelFilter::Info,
-        _ => LevelFilter::Debug,
+    let level = match verbosity {
+        0 => "error",
+        1 => "info",
+        _ => "debug",
     };
 
-    env_logger::Builder::new().filter_level(log_level).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+        )
+        .init();
 
     match cmd {
         Command::Server(server_options, servertype) => match servertype {

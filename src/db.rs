@@ -4,7 +4,6 @@ use postgres::{Client, NoTls};
 use std::collections::HashMap;
 use std::env;
 
-use log;
 
 trait PgConn {
     fn from_env() -> Self
@@ -91,7 +90,7 @@ impl PgConn for PostgresClientArgs {
             Some(s) => match s.parse::<u16>() {
                 Ok(p) => p,
                 Err(err) => {
-                    log::info!("error=true module=db class=env-parse-int value={s} error={err:?}");
+                    tracing::info!("error=true module=db class=env-parse-int value={s} error={err:?}");
                     5432
                 }
             },
@@ -139,7 +138,7 @@ pub fn connect_to_db() -> postgres::Client {
 
     let conn = Client::connect(cs.as_str(), NoTls).expect("could not connect to database");
 
-    log::info!("started pg conn");
+    tracing::info!("started pg conn");
 
     conn
 }
