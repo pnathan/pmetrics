@@ -946,7 +946,10 @@ mod tests {
     fn test_state() -> AppState {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let prometheus = recorder.handle();
-        AppState { pool: test_pool(), prometheus }
+        AppState {
+            pool: test_pool(),
+            prometheus,
+        }
     }
 
     async fn seed_tenant(client: &deadpool_postgres::Client) -> (i32, String) {
@@ -979,7 +982,10 @@ mod tests {
 
     async fn cleanup_tenant(client: &deadpool_postgres::Client, tid: i32) {
         client
-            .execute("DELETE FROM monitoring.api_key WHERE tenant_id = $1", &[&tid])
+            .execute(
+                "DELETE FROM monitoring.api_key WHERE tenant_id = $1",
+                &[&tid],
+            )
             .await
             .ok();
         client
